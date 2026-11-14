@@ -1,0 +1,53 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+
+a = Analysis(
+    ['main.py'],
+    pathex=[],
+    binaries=[],
+    datas=[('assets/fonts/*.ttf', 'assets/fonts'),
+           ('assets/coins/*.png', 'assets/coins'),
+           ('assets/app_icon.png', 'assets'),
+           ('assets/app_icon.ico', 'assets'),
+           ('assets/app_icons/*.png', 'assets/app_icons'),
+           ('assets/app_icons/*.ico', 'assets/app_icons'),
+           ('assets/app_icons/manifest.json', 'assets/app_icons'),
+           ('assets/mascot.png', 'assets'),
+           ('data/top300.json', 'data')],
+    hiddenimports=['core.shortcut', 'core.live_feed', 'core.indicator_params',
+                   'core.onchain_history', 'core.brand',
+                   'ui.units', 'ui.mascot', 'ui.indicator_sheet',
+                   'ui.info_panel', 'ui.detail_dialog', 'data.fundamentals',
+                   'data.contract_search', 'data.onchain', 'data.about',
+                   'data.timeline', 'data.history_stats',
+                   'PySide6.QtNetwork'],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='Free Chart',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    icon='assets/app_icon.ico',
+    codesign_identity=None,
+    entitlements_file=None,
+)

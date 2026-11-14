@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 style.css 深色主题一致，避免冷启动时闪白屏 -->
+    <color name="bg_dark">#FF0B0E11</color>
+    <color name="panel_dark">#FF181A20</color>
+</resources>

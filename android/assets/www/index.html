@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b0e11">
+<title>Free Chart · 全市场行情与品种档案</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <header id="topbar">
+    <button id="btnBack" class="top-btn" aria-label="返回">←</button>
+    <span class="logo">◈</span>
+    <span class="brand" title="自由缩放 K 线 · 跨市场行情 · 品种发展历程">Free Chart</span>
+    <span id="pageTitle" class="page-title">行情</span>
+    <span class="spacer"></span>
+    <button id="btnRefresh" class="top-btn" aria-label="刷新">⟳</button>
+  </header>
+
+  <main id="view">
+
+    <!-- ============ 行情 ============ -->
+    <section id="pageList" class="page">
+      <!-- 顶部工具区：随列表上滑收起、下滑展开（见 .list-head / headOnScroll） -->
+      <div id="listHead" class="list-head">
+        <div id="markets" class="markets"></div>
+        <div id="subs" class="subs"></div>
+        <div class="toolbar">
+          <button id="btnSearch" class="icon-btn" aria-label="搜索">🔍</button>
+          <input id="search" type="search" placeholder="筛选 / 搜索（点 🔍 打开结果页）"
+                 autocomplete="off" enterkeyhint="search">
+          <button id="btnSortDir" class="icon-btn" aria-label="切换升降序">⇅</button>
+          <button id="btnSortMenu" class="icon-btn" aria-label="排序菜单">☰</button>
+        </div>
+      </div>
+      <div class="section-head">
+        <span id="sectionTitle">自选行情</span>
+        <span id="sectionCount" class="badge">0</span>
+        <span id="sortLabel" class="sort-label">自定义</span>
+      </div>
+      <div id="list" class="list"></div>
+      <button id="loadMore" class="load-more" hidden>加载更多</button>
+    </section>
+
+    <!-- ============ 搜索结果（独立页面，不与行情列表同层） ============ -->
+    <section id="pageSearch" class="page" hidden>
+      <div class="search-head">
+        <button id="btnSearchBack" class="top-btn" aria-label="返回行情">←</button>
+        <b>搜索</b>
+        <button id="btnClearHistory" class="text-btn">清空历史</button>
+      </div>
+      <div class="toolbar">
+        <input id="searchBox" type="search" placeholder="代码 / 名称 / 链上合约地址"
+               autocomplete="off" enterkeyhint="search">
+        <button id="btnSearchGo" class="icon-btn" aria-label="搜索">🔍</button>
+      </div>
+      <div class="section-head">
+        <span id="searchTitle">最近搜索</span>
+        <span id="searchCount" class="badge">0</span>
+      </div>
+      <div id="searchBody" class="list"></div>
+      <p class="muted pad">点击结果进入图表；只有点结果右侧「＋」才会加入自选。</p>
+    </section>
+
+    <!-- ============ 图表 ============ -->
+    <section id="pageChart" class="page" hidden>
+      <div class="chart-head">
+        <div class="chart-id">
+          <span id="chartIco" class="ico lg"></span>
+          <b id="chartCode">--</b>
+          <span id="chartName"></span>
+        </div>
+        <div class="chart-price">
+          <b id="chartPrice">--</b>
+          <span id="chartChange">--</span>
+        </div>
+      </div>
+      <div id="intervals" class="intervals"></div>
+      <div class="canvas-wrap"><canvas id="kline"></canvas></div>
+      <div class="chart-tools">
+        <button id="btnReset" data-act="reset">⟲ 最新</button>
+        <button id="btnDetail">ⓘ 详情</button>
+        <button id="btnIndicators">⚙ 指标</button>
+      </div>
+      <div id="chartNote" class="chart-note"></div>
+    </section>
+
+    <!-- ============ 设置 ============ -->
+    <section id="pageSettings" class="page" hidden>
+      <div class="card">
+        <h3>行情</h3>
+        <label class="row-between">刷新间隔（秒）
+          <input id="setIntervalNum" type="number" min="5" max="300" step="1" value="15"
+                 class="num-input" inputmode="numeric">
+        </label>
+        <div class="quick-row" id="quickIntervals">
+          <button data-quick="5">5s</button><button data-quick="10">10s</button>
+          <button data-quick="15">15s</button><button data-quick="30">30s</button>
+          <button data-quick="60">60s</button><button data-quick="120">2m</button>
+          <button data-quick="300">5m</button>
+        </div>
+        <label class="row-between">默认市场
+          <select id="setMarket">
+            <option value="crypto">加密货币</option><option value="cn">A股</option>
+            <option value="hk">港股</option><option value="us">美股</option>
+          </select>
+        </label>
+        <label class="row-between">默认排序
+          <select id="setSort"></select>
+        </label>
+        <label class="row-between">每页条数
+          <select id="setPageSize">
+            <option value="30">30 条</option><option value="60">60 条</option>
+            <option value="100">100 条</option><option value="200">200 条</option>
+          </select>
+        </label>
+        <label class="row-between">失败重试次数
+          <select id="setRetry">
+            <option value="1">1 次（省流量）</option>
+            <option value="2">2 次</option>
+            <option value="3">3 次（默认）</option>
+            <option value="5">5 次（弱网）</option>
+          </select>
+        </label>
+        <p class="muted">行情源按市场自动路由：加密货币走币安、股票走腾讯、链上合约走 Rugcheck，不做无谓的手动切换。</p>
+        <label class="row-between">实时价轮询
+          <input id="setLive" type="checkbox" class="switch">
+        </label>
+        <label class="row-between">轮询间隔
+          <select id="setLiveMs">
+            <option value="500">0.5 秒</option><option value="900">0.9 秒</option>
+            <option value="1500">1.5 秒</option><option value="3000">3 秒</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="card">
+        <h3>外观</h3>
+        <label class="row-between">全局主题
+          <select id="setTheme">
+            <option value="binance">币安深色</option>
+            <option value="midnight">午夜蓝</option>
+            <option value="oled">OLED 纯黑</option>
+            <option value="light">明亮浅色</option>
+            <option value="cyber">赛博霓虹</option>
+            <option value="sepia">护眼米黄</option>
+          </select>
+        </label>
+        <label class="row-between">图表字号
+          <select id="setFontScale">
+            <option value="100">100%</option><option value="120">120%（默认）</option>
+            <option value="140">140%</option><option value="160">160%</option>
+          </select>
+        </label>
+        <label class="row-between">价格显示货币单位
+          <input id="setCurrency" type="checkbox" class="switch">
+        </label>
+        <label class="row-between">品种图标
+          <input id="setIcons" type="checkbox" class="switch" checked>
+        </label>
+      </div>
+
+      <div class="card">
+        <h3>图表指标</h3>
+        <div class="switch-grid">
+          <label><input id="setShowMa" type="checkbox"> MA 均线</label>
+          <label><input id="setShowEma" type="checkbox"> EMA 均线</label>
+          <label><input id="setShowBoll" type="checkbox"> BOLL 布林</label>
+          <label><input id="setShowMacd" type="checkbox"> MACD 副图</label>
+          <label><input id="setShowVol" type="checkbox"> VOL 成交量</label>
+        </div>
+        <button id="btnOpenIndicators" class="big-btn ghost">⚙ 均线天数 / 参数（可按周期分别设置）</button>
+        <p class="muted">MA / EMA 各 4 条，天数 2~500；BOLL 周期与倍数、MACD 快慢线均可调。参数可按「全部周期」或「仅当前周期」保存。</p>
+      </div>
+
+      <div class="card">
+        <h3>数据与缓存</h3>
+        <div class="kv"><span>行情源</span><span>Binance · 腾讯行情</span></div>
+        <div class="kv"><span>市值 / 供应量</span><span>CoinLore · 腾讯行情</span></div>
+        <div class="kv"><span>K 线</span><span>Binance · 腾讯日 K · 新浪美股</span></div>
+        <div class="kv"><span>链上报价</span><span>Rugcheck（Solana）</span></div>
+        <div class="kv"><span>版本</span><span id="appVersion">1.2.0</span></div>
+        <label class="row-between">行情快照保留
+          <select id="setCacheKeep">
+            <option value="1">仅本次启动</option>
+            <option value="7">7 天</option>
+            <option value="30">30 天</option>
+          </select>
+        </label>
+        <button id="btnClearCache" class="big-btn ghost">清除本地行情缓存</button>
+        <p class="muted">所有数值来自公开接口实时返回；取不到的字段明确标注「暂无公开数据」，不使用估算或假数据。</p>
+      </div>
+
+      <div class="card">
+        <h3>自选与置顶</h3>
+        <div class="kv"><span>自选品种</span><span id="setWatchCount">0</span></div>
+        <div class="kv"><span>置顶品种</span><span id="setPinCount">0</span></div>
+        <div class="kv"><span>搜索历史</span><span id="setHistoryCount">0</span></div>
+        <button id="btnExport" class="big-btn ghost">导出配置（复制 JSON）</button>
+        <button id="btnImport" class="big-btn ghost">导入配置（粘贴 JSON）</button>
+      </div>
+
+      <div class="card">
+        <h3>桌面端专属功能</h3>
+        <p class="muted">以下能力依赖 Windows 系统接口，Android 没有对应权限或界面，故不在手机端提供：系统托盘图标 / 任务栏常驻价格条 / 开机自启 / 窗口置顶与透明度 / 无边框窗口 / 看板娘悬浮窗。</p>
+        <p class="muted">手机端等价能力：后台定时刷新 + 状态栏、底部导航、长按品种菜单、触摸惯性滚动、SharedPreferences 持久化。</p>
+      </div>
+      <button id="btnSettingsBack" class="big-btn">← 返回</button>
+    </section>
+  </main>
+
+  <div id="status" class="status">
+    <span id="statusText">● 连接中 · 来源 --</span>
+    <button id="btnRetry" hidden>重试</button>
+  </div>
+
+  <nav id="bottomNav" class="bottom-nav">
+    <button data-tab="list" class="active"><i>▤</i><span>行情</span></button>
+    <button data-tab="chart"><i>▥</i><span>图表</span></button>
+    <button data-tab="settings"><i>⚙</i><span>设置</span></button>
+  </nav>
+</div>
+
+<!-- 弹出层 -->
+<div id="sortSheet" class="sheet" hidden>
+  <div class="sheet-head"><b>排序方式</b><button data-close="sortSheet">✕</button></div>
+  <div id="sortOptions" class="sheet-body"></div>
+</div>
+<div id="rowSheet" class="sheet" hidden>
+  <div class="sheet-head"><b id="rowSheetTitle">品种操作</b><button data-close="rowSheet">✕</button></div>
+  <div id="rowOptions" class="sheet-body"></div>
+</div>
+<div id="detailSheet" class="sheet full" hidden>
+  <div class="sheet-head"><b>品种详情</b><button data-close="detailSheet">✕</button></div>
+  <div id="detailBody" class="sheet-body"></div>
+</div>
+<div id="indicatorSheet" class="sheet full" hidden>
+  <div class="sheet-head"><b>⚙ 指标参数</b><button data-close="indicatorSheet">✕</button></div>
+  <div id="indicatorBody" class="sheet-body"></div>
+  <div class="sheet-foot">
+    <button id="btnIndReset" class="big-btn ghost">恢复默认</button>
+    <button id="btnIndApply" class="big-btn">应用</button>
+  </div>
+</div>
+<div id="textSheet" class="sheet" hidden>
+  <div class="sheet-head"><b id="textSheetTitle">文本</b><button data-close="textSheet">✕</button></div>
+  <div id="textBody" class="sheet-body"></div>
+</div>
+<div id="toast" class="toast" hidden></div>
+<div id="scrim" class="scrim" hidden></div>
+
+<script src="universe.js"></script>
+<script src="about.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

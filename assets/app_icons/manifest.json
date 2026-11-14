@@ -1,0 +1,20 @@
+{
+  "classic": {
+    "label": "经典 · 赛博徽标"
+  },
+  "neon": {
+    "label": "霓虹 C"
+  },
+  "candle": {
+    "label": "K 线蜡烛"
+  },
+  "orbit": {
+    "label": "轨道芯片"
+  },
+  "wave": {
+    "label": "上升波浪"
+  },
+  "hex": {
+    "label": "六边形币"
+  }
+}

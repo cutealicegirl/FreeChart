@@ -1,0 +1,56 @@
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── 构建产物（PyInstaller / Android）────────────────────
+build/
+dist/
+android/build/
+android/dist/
+# 已清理的冗余构建目录（若本地仍有残留）
+dist_new/
+dist_v34/
+dist_v35/
+dist_v36/
+dist/archive/
+# Inno Setup 生成的安装包（构建产物，非源码）
+installer/out/
+
+# ── 生成 / 缓存的预览图 ─────────────────────────────────
+preview/
+
+# ── 二进制交付物 ────────────────────────────────────────
+*.exe
+*.apk
+*.aab
+*.idsig
+
+# ── 密钥 / 签名（构建脚本会自动生成，切勿提交）─────────
+*.keystore
+*.jks
+
+# ── 运行期本地数据（实际位于 %APPDATA%/CryptoTicker，此处兜底）──
+config.json
+*.sqlite3
+*.db
+error.log
+
+# ── Node（Android 端测试用）─────────────────────────────
+node_modules/
+
+# ── 编辑器 / 操作系统 ───────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# ── 本项目元数据 ───────────────────────────────────────
+.workbuddy/
