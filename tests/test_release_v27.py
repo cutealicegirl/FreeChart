@@ -45,12 +45,11 @@ def wait_fill(w, key, timeout=10.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         app.processEvents()
-        if key not in w._filling_all and \
-                len(w.all_rows[key]) >= len(all_of(key)):
+        if key not in w._filling_all:
             pump(0.05)
             return
         time.sleep(0.005)
-    raise AssertionError("分批建行超时")
+    raise AssertionError("建行超时")
 
 
 def mounted(w, key):
@@ -68,13 +67,14 @@ w.resize(560, 900)
 w.prepare_show()
 key = w._current_market()
 
-# ============ 1. 首屏只挂载一页 ============
+# ============ 1. 首屏只挂载一页（行对象也按页建，不一次性全量） ============
 w._switch_sub("all")
 wait_fill(w, key)
 total = len(all_of(key))
 first = mounted(w, key)
-assert len(w.all_rows[key]) == total, "行对象仍须齐备（兼容既有行为）"
-assert len(first) == PAGE_SIZE, \
+assert len(w.all_rows[key]) == min(PAGE_SIZE, total), \
+    "按页按需：首屏只应创建一页的行对象"
+assert len(first) == min(PAGE_SIZE, total), \
     f"首屏只该挂 {PAGE_SIZE} 行，实际 {len(first)}"
 assert all(hasattr(x, "symbol") for x in first), \
     "列表布局里不该混入非行情行控件"

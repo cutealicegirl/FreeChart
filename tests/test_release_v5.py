@@ -27,19 +27,18 @@ from data.klines import Candle
 from data.universe import TOP_N, all_of, names
 from ui.chart_view import CandleChart, ChartView
 from ui.icons import icon_file, symbol_icon, tray_price_icon
-from ui.main_window import MainWindow, SORT_MODES, SortCycleButton
+from ui.main_window import MainWindow, PAGE_SIZE, SORT_MODES, SortCycleButton
 from ui.ticker_widget import TickerWidget
 
 app = QApplication([])
 
 
 def pump_rows(window, key, timeout=8.0):
-    """驱动事件循环直到「全部」页分批建行结束（每帧 80 行）。"""
+    """驱动事件循环直到「全部」页首屏建行结束（按页按需，同步完成）。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         QApplication.processEvents()
-        if key not in window._filling_all and \
-                len(window.all_rows[key]) >= len(all_of(key)):
+        if key not in window._filling_all:
             QApplication.processEvents()
             return
         time.sleep(0.005)
@@ -136,7 +135,9 @@ for key, title in (("crypto", "加密货币"), ("cn", "A股"),
 w._switch_sub("all")
 QApplication.processEvents()
 pump_rows(w, "crypto")
-assert len(w.all_rows["crypto"]) == 200, len(w.all_rows["crypto"])
+# 按页按需：行对象只建首屏一页；计数仍显示全市场数量
+assert len(w.all_rows["crypto"]) == min(PAGE_SIZE, len(all_of("crypto"))), \
+    len(w.all_rows["crypto"])
 assert w.lbl_count.text() == "200"
 
 tickers = {"BTC": fake_ticker("BTC"), "ETH": fake_ticker("ETH", 3200.0)}

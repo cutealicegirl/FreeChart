@@ -8,12 +8,18 @@
 - 点击条目进入全宽 K 线图表页；右键菜单管理顺序、自选与托盘品种；
 - 系统托盘：开机自启可自动隐藏，图标上实时显示自定义品种价格。
 """
+import sys
 import threading
 import time
 
+if sys.platform == "win32":
+    import ctypes.wintypes as _cwin    # 无边框窗口原生边缘缩放（WM_NCHITTEST）
+else:                                  # 非 Windows：仅标题栏拖动 + 最大化按钮
+    _cwin = None
+
 from PySide6.QtCore import (QEvent, QObject, QPoint, QRect, QSize, Qt,
                             QThread, QTimer, Signal)
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QIcon, QCursor
 from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QHBoxLayout,
                                QLabel, QLineEdit, QMainWindow, QMenu,
                                QPushButton, QScrollArea, QScroller, QSizePolicy,
@@ -282,28 +288,78 @@ class TitleBar(QWidget):
 
         self.btn_back = mkbtn("←", "返回上一页")
         btn_min = mkbtn("–", "隐藏到右下角托盘")
+        self.btn_max = mkbtn("□", "最大化 / 还原（双击标题栏同样生效）")
+        self.btn_full = mkbtn("⛶", "全屏显示")
+        # 水平 Ignored：这两颗按钮不得把窗口最小宽度顶高（否则较窄的
+        # 记忆宽度还原不回去，图表页返回后尺寸恢复会失败）。空间够时
+        # stretch 会把它们的 sizeHint(44px) 留出来；窗口变窄时由
+        # resizeEvent 收起，不会被看到裁切。
+        self.btn_max.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.btn_full.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         btn_close = mkbtn("×", "退出程序", danger=True)
         self.btn_back.clicked.connect(window._navigate_back)
         btn_min.clicked.connect(window.hide_to_tray)
+        self.btn_max.clicked.connect(window.toggle_maximize)
+        self.btn_full.clicked.connect(window.toggle_fullscreen)
         btn_close.clicked.connect(window.quit_app)
         layout.addWidget(self.btn_back)
         layout.addWidget(btn_min)
+        layout.addWidget(self.btn_max)
+        layout.addWidget(self.btn_full)
         layout.addWidget(btn_close)
         self.set_page("行情", False)
+        self.sync_window_state()
 
     def set_page(self, text: str, can_back: bool = True):
         """统一标题栏：页面名 + 返回按钮显隐。"""
         self.lbl_page.setText(text)
         self.btn_back.setVisible(bool(can_back))
 
+    def sync_window_state(self):
+        """窗口状态（常规 / 最大化 / 全屏）变化时刷新按钮图标与提示。"""
+        w = self.window
+        if w.isFullScreen():
+            self.btn_max.setText("□")
+            self.btn_max.setToolTip("退出全屏后可用")
+            self.btn_full.setToolTip("退出全屏")
+        elif w.isMaximized():
+            self.btn_max.setText("❐")
+            self.btn_max.setToolTip("还原窗口大小")
+            self.btn_full.setToolTip("全屏显示")
+        else:
+            self.btn_max.setText("□")
+            self.btn_max.setToolTip("最大化 / 还原（双击标题栏同样生效）")
+            self.btn_full.setToolTip("全屏显示")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 窄窗口收起最大化 / 全屏按钮：这颗按钮的最小宽度会把整个窗口
+        # 的可恢复宽度顶高，导致记忆里较窄的窗口还原不回去。收起后
+        # 最大化仍可双击标题栏触发，全屏拉宽窗口或双击后使用。
+        narrow = self.width() < 440
+        if self.btn_max.isVisible() == narrow:
+            self.btn_max.setVisible(not narrow)
+        if self.btn_full.isVisible() == narrow:
+            self.btn_full.setVisible(not narrow)
+
+    def _move_locked(self) -> bool:
+        """最大化 / 全屏时不允许拖动移动窗口。"""
+        w = self.window
+        return w.isMaximized() or w.isFullScreen()
+
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton and not self._move_locked():
             self._drag_pos = event.globalPosition().toPoint() \
                 - self.window.frameGeometry().topLeft()
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and not self.window.isFullScreen():
+            self.window.toggle_maximize()
+
     def mouseMoveEvent(self, event):
         if self._drag_pos is not None \
-                and event.buttons() & Qt.LeftButton:
+                and event.buttons() & Qt.LeftButton \
+                and not self._move_locked():
             self.window.move(event.globalPosition().toPoint()
                              - self._drag_pos)
 
@@ -805,63 +861,69 @@ class MainWindow(QMainWindow):
             QToolTip.hideText()       # 收掉建行期间可能残留的最后一个气泡
 
     def _ensure_all_rows(self, key: str):
-        """懒创建某市场「全部」页的行（切换时才创建，分批创建不卡界面）。
+        """懒创建某市场「全部」页的行：按页建，滚动到底再补下一页。
 
-        美股 500 行同步建完要 1.8 秒，点一下「全部」整窗会僵住。这里先建
-        第一批 80 行立刻显示，其余按帧续建，滚动时基本无感。
+        旧版虽然只挂载前 60 行，但会把全市场（美股 500 个）行对象
+        全部预创建：对象还是要 1.8 秒才建完、内存照占、进度提示照样
+        跑到 500。现在改成真正的按页按需——首屏只建并挂载
+        PAGE_SIZE 行；排序变化 / 滚动翻页时由 _relayout_page 现场
+        补建新进入窗口的行。
         """
         if self.all_rows[key] or key in self._filling_all:
             return
         self._filling_all.add(key)
         begin_tooltip_hold()          # 建行期间别让原生提示小窗连环弹
         nm = names(key)
-        self._fill_rows(key, nm, list(all_of(key)))
+        self._fill_rows(key, nm, list(all_of(key))[:PAGE_SIZE])
 
-    def _fill_rows(self, key: str, nm: dict, syms: list, batch: int = 60):
-        """分批「准备」行对象，但只把首屏窗口挂进布局。
-
-        阶段 2 之前这里会把 500 行全部 addWidget 进布局，并对 500 行
-        逐个补图标 / 刷新价格，正是打开「全部」时卡屏与提示框连环弹的
-        根源。现在每批只创建对象（冻住重绘），布局里始终最多只有
-        _page_limit[key] 行；滚动接近底部再追加下一页。
-        """
-        page = self.pages[key]
-        try:
-            chunk, rest = syms[:batch], syms[batch:]
-            page["page"].setUpdatesEnabled(False)
-            for symbol in chunk:
-                if symbol in self.all_rows[key]:
-                    continue
+    def _create_all_rows(self, key: str, syms: list):
+        """补建「全部」页指定标的的行对象（不挂载，交给 _relayout_page）。"""
+        if not syms:
+            return
+        nm = names(key)
+        for symbol in syms:
+            if symbol in self.all_rows[key]:
+                continue
+            try:
                 row = TickerWidget(symbol, nm.get(symbol, ""), mode="all",
                                    in_watchlist=(symbol in self.rows),
-                                   parent=page["page"], defer_icon=True)
-                # UniqueConnection：即使将来行被复用 / 重连，也不会重复绑定
-                row.toggled.connect(self._on_row_toggle, Qt.UniqueConnection)
-                row.context_menu.connect(self._on_row_context,
-                                         Qt.UniqueConnection)
-                row.long_pressed.connect(self._on_row_long_press,
-                                         Qt.UniqueConnection)
-                row.row_clicked.connect(self._open_chart, Qt.UniqueConnection)
-                self.all_rows[key][symbol] = row
-        except Exception:
-            # 任一批失败都不能把全局 tooltip 开关或 _filling_all 永久卡住
-            self._release_fill(key)
-            return
+                                   parent=self.pages[key]["page"],
+                                   defer_icon=True)
+            except Exception:
+                # 单行失败不拖垮整页；下一轮进入窗口时会再试
+                continue
+            # UniqueConnection：即使将来行被复用 / 重连，也不会重复绑定
+            row.toggled.connect(self._on_row_toggle, Qt.UniqueConnection)
+            row.context_menu.connect(self._on_row_context,
+                                     Qt.UniqueConnection)
+            row.long_pressed.connect(self._on_row_long_press,
+                                     Qt.UniqueConnection)
+            row.row_clicked.connect(self._open_chart, Qt.UniqueConnection)
+            self.all_rows[key][symbol] = row
+
+    def _fill_rows(self, key: str, nm: dict, syms: list):
+        """按需创建传入标的的行（只建这一批，绝不递归全量预建）。
+
+        旧版「分批预建全市场对象」已移除；后续页由 _relayout_page /
+        _load_more_page 在滚动翻页时现场补建。
+        """
+        page = self.pages[key]
+        frozen = page["page"].updatesEnabled()
+        try:
+            page["page"].setUpdatesEnabled(False)
+            self._create_all_rows(key, syms)
         finally:
-            page["page"].setUpdatesEnabled(True)
-        # 当前正在看这个「全部」页：只重排已挂载窗口（前 60 行），
-        # 后续批次创建的对象不影响窗口，_relayout_page 会直接短路返回。
+            page["page"].setUpdatesEnabled(frozen)
+        # 当前正在看这个「全部」页：立即挂载并只刷新窗口内的行
         if self._current_market() == key \
                 and self._sub_tabs.get(key) == "all" \
                 and not self._in_relayout:
             self._relayout_page(key)
             self._paint_page_rows(key)
-        if rest:
-            QTimer.singleShot(
-                0, lambda: self._fill_rows(key, nm, rest, batch))
-        else:
-            self._release_fill(key)
-            self._update_load_progress(key)
+            self._load_icons([self.all_rows[key][s] for s in syms
+                              if s in self.all_rows[key]])
+        self._release_fill(key)
+        self._update_load_progress(key)
 
     def _append_rows(self, key: str, rows: list):
         """把新行追加到页面末尾，不重排已有行（避免整页反复重建）。"""
@@ -979,6 +1041,11 @@ class MainWindow(QMainWindow):
         if sub == "all":
             # 布局里只挂载已加载的页数 —— 首屏 60 行，而非 500 行。
             order = order[:self._page_limit.get(key, PAGE_SIZE)]
+            # 按页补建窗口内尚不存在的行：排序变化 / 滚动翻页后，新进入
+            # 窗口的标的现场创建，绝不再一次性预建整个市场的行对象
+            missing = [s for s in order if s not in rows]
+            if missing:
+                self._create_all_rows(key, missing)
         target = [rows[s] for s in order if s in rows]
         self._load_icons(target)      # 图标也只为挂载中的行补，不预热 500 个
         pset = set(self.pinned)
@@ -1603,6 +1670,86 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
         if event.type() == QEvent.WindowStateChange:
             self._sync_mascot_visibility()
+            tb = getattr(self, "title_bar", None)
+            if tb is not None:
+                tb.sync_window_state()
+
+    # ============ 窗口：最大化 / 全屏 / 无边框边缘缩放 ============
+    def toggle_maximize(self):
+        """最大化 / 还原（标题栏 □ 按钮，双击标题栏同样生效）。"""
+        if self.isFullScreen():
+            return
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def toggle_fullscreen(self):
+        """全屏 / 退出全屏；退出时回到进入前的状态（最大化或常规）。"""
+        if self.isFullScreen():
+            if getattr(self, "_was_maximized", False):
+                self.showMaximized()
+            else:
+                self.showNormal()
+        else:
+            self._was_maximized = self.isMaximized()
+            self.showFullScreen()
+
+    def keyPressEvent(self, event):
+        # 全屏时按 ESC 退出，保证永远有办法回到窗口模式
+        if event.key() == Qt.Key_Escape and self.isFullScreen():
+            self.toggle_fullscreen()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _frameless_hit_test(self):
+        """鼠标是否位于无边框窗口的可缩放边缘，返回 Windows HT* 值。"""
+        m = 6                                  # 边缘热区宽度（px）
+        pos = QCursor.pos()                    # 逻辑坐标，DPI 安全
+        g = self.frameGeometry()
+        on_l = 0 <= pos.x() - g.left() < m
+        on_r = 0 <= g.right() - pos.x() < m
+        on_t = 0 <= pos.y() - g.top() < m
+        on_b = 0 <= g.bottom() - pos.y() < m
+        if not (on_l or on_r or on_t or on_b):
+            return None
+        if on_t and on_l:
+            return 13                          # HTTOPLEFT
+        if on_t and on_r:
+            return 14                          # HTTOPRIGHT
+        if on_b and on_l:
+            return 16                          # HTBOTTOMLEFT
+        if on_b and on_r:
+            return 17                          # HTBOTTOMRIGHT
+        if on_l:
+            return 10                          # HTLEFT
+        if on_r:
+            return 11                          # HTRIGHT
+        if on_t:
+            return 12                          # HTTOP
+        if on_b:
+            return 15                          # HTBOTTOM
+        return None
+
+    def nativeEvent(self, eventType, message):
+        """无边框窗口的边缘拉伸：用原生 WM_NCHITTEST 把四边声明成缩放边。
+
+        必须在系统层处理——Qt 子控件铺满了窗口，QWidget 的鼠标事件
+        拿不到边缘区域；原生 hit-test 无视子控件，可以在任意控件上
+        直接拖边缩放。仅 Windows 且无边框模式生效。
+        """
+        if (_cwin is not None
+                and eventType == b"windows_generic_MSG"
+                and self.isVisible()
+                and not self.isMaximized() and not self.isFullScreen()
+                and bool(self.windowFlags() & Qt.FramelessWindowHint)):
+            msg = _cwin.MSG.from_address(int(message))
+            if msg.message == 0x0084:          # WM_NCHITTEST
+                hit = self._frameless_hit_test()
+                if hit is not None:
+                    return True, hit
+        return super().nativeEvent(eventType, message)
 
 
     # ================= 品种资料弹窗（右键菜单触发） =================
@@ -1779,7 +1926,38 @@ class MainWindow(QMainWindow):
         x, y, w, h = self._list_geometry
         self._list_geometry = None
         self.move(x, y)
+        self._resize_for_restore(w, h)
+
+    def _resize_for_restore(self, w: int, h: int):
+        """还原较窄的记忆宽度前先解除对最小宽度的钳制。
+
+        图表页时窗口被放大，其最小宽度（minimumSizeHint / minimumSize）
+        会被顶到 ~439px；直接 resize 到记忆里的窄宽度（默认 380）会被
+        钳住，还原不回去。这里临时把窗口最小尺寸降到 0，resize 成功后再
+        恢复一个不超过目标宽度的安全最小值，保证窄窗口几何能精确还原。
+        同时若当前停在图表页，先切回列表页并收起最大化 / 全屏按钮。
+        """
+        tb = getattr(self, "title_bar", None)
+        stack = getattr(self, "stack", None)
+        chart = getattr(self, "chart_view", None)
+        if w < 440:
+            if tb is not None:
+                tb.btn_max.hide()
+                tb.btn_full.hide()
+            if stack is not None and chart is not None \
+                    and stack.currentWidget() is chart:
+                key = self._current_market()
+                for i, (gkey, _, _) in enumerate(MARKET_GROUPS):
+                    if gkey == key:
+                        stack.setCurrentIndex(i)
+                        break
+        # 临时解除钳制：否则 offscreen / 某些平台上 minimumSize 已偏高，
+        # resize 会被静默钳到该值，窄窗口几何永远回不去。
+        prev_min = self.minimumSize()
+        self.setMinimumSize(0, 0)
         self.resize(w, h)
+        safe_min_w = prev_min.width() if prev_min.width() else 0
+        self.setMinimumSize(min(safe_min_w, w), 0)
 
     # ================= 页签 / 子菜单 =================
     def _switch_market(self, key: str):
@@ -1787,15 +1965,17 @@ class MainWindow(QMainWindow):
             return
         self.chart_view.close_chart()
         self.info_panel.hide_popup()      # 换市场：右键资料弹窗跟着收起
-        self._leave_chart_layout()
-        # 搜索页是 stack 独立图层，切市场自动离开；筛选文本保留
-        self.tabs.set_active(key)
+        # 先切回该市场的列表页：否则 _leave_chart_layout 还原几何时
+        # chart_view 仍可见、其控件最小宽度会钳住窄窗口的恢复。
         for i, (gkey, _, _) in enumerate(MARKET_GROUPS):
             if gkey == key:
                 self.stack.setCurrentIndex(i)
                 break
-        # stack 切走后看板娘的「只在图表页」许可要重新评估：
-        # _leave_chart_layout 执行时 stack 还停在图表页，单靠它收不干净
+        self._leave_chart_layout()
+        # 搜索页是 stack 独立图层，切市场自动离开；筛选文本保留
+        self.tabs.set_active(key)
+        # stack 已在上面临时切回列表页，这里重新同步看板娘 / 标题：
+        # 此刻 chart_view 不可见，看板娘必然隐藏。
         self._sync_mascot_visibility()
         self.title_bar.set_page("行情", False)
         self.config.set("last_tab", key)
@@ -2091,7 +2271,7 @@ class MainWindow(QMainWindow):
         if x >= 0 and y >= 0:
             self.move(x, y)
         if w > 0 and h > 0:
-            self.resize(w, h)
+            self._resize_for_restore(w, h)
         if self.isVisible():
             self.show()
         self._sync_mascot_visibility()
@@ -2099,6 +2279,8 @@ class MainWindow(QMainWindow):
     def _save_current_geometry_before_reapply(self):
         if self._list_geometry is not None:
             return
+        if self.isMaximized() or self.isFullScreen():
+            return      # 最大化 / 全屏时不动记忆中的常规尺寸
         self.config.set("x", self.x())
         self.config.set("y", self.y())
         self.config.set("w", self.width())
@@ -2107,6 +2289,8 @@ class MainWindow(QMainWindow):
     def save_geometry(self):
         if self._list_geometry is not None:
             return
+        if self.isMaximized() or self.isFullScreen():
+            return      # 最大化 / 全屏不覆盖常规几何，下次启动尺寸正常
         self.config.set("x", self.x())
         self.config.set("y", self.y())
         self.config.set("w", self.width())
@@ -2873,7 +3057,7 @@ class MainWindow(QMainWindow):
             x, y, w, h = self._list_geometry
             self._list_geometry = None
             self.move(x, y)
-            self.resize(w, h)
+            self._resize_for_restore(w, h)
         self.save_geometry()
         if self._force_quit:
             event.accept()

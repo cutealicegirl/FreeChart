@@ -35,12 +35,11 @@ app = QApplication([])
 
 
 def pump_rows(window, key, timeout=8.0):
-    """驱动事件循环直到「全部」页分批建行结束（每帧 80 行）。"""
+    """驱动事件循环直到「全部」页首屏建行结束（按页按需，同步完成）。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         QApplication.processEvents()
-        if key not in window._filling_all and \
-                len(window.all_rows[key]) >= len(all_of(key)):
+        if key not in window._filling_all:
             QApplication.processEvents()
             return
         time.sleep(0.005)
@@ -143,13 +142,13 @@ assert cfg.get("sub_tabs")["crypto"] == "all", "子页应持久化"
 all_count = sum(1 for i in range(lay.count())
                 if lay.itemAt(i).widget() is not None
                 and hasattr(lay.itemAt(i).widget(), "symbol"))
-# 阶段 2：首屏只挂载一页（按需加载），行对象仍全量准备、滚动再追加
+# 按页按需：首屏只建并挂载一页（PAGE_SIZE）行对象，滚动再补下一页
 assert all_count == min(PAGE_SIZE, len(all_of("crypto"))), all_count
-assert len(w.all_rows["crypto"]) == len(all_of("crypto")), \
-    "行对象应齐备，虚拟化只作用于布局挂载"
+assert len(w.all_rows["crypto"]) == min(PAGE_SIZE, len(all_of("crypto"))), \
+    "行对象应按页创建，不得一次性建全市场"
 assert all(w.all_rows["crypto"][s].btn_action is not None
-           for s in all_of("crypto"))
-target = next(s for s in all_of("crypto") if s not in w.rows)
+           for s in w.all_rows["crypto"])
+target = next(s for s in w.all_rows["crypto"] if s not in w.rows)
 w.all_rows["crypto"][target].btn_action.click()
 assert target in w.rows, "全部页按钮应能加入自选"
 w.all_rows["crypto"][target].btn_action.click()
@@ -160,7 +159,8 @@ w._switch_market("cn")
 w._switch_sub("all")
 QApplication.processEvents()
 pump_rows(w, "cn")
-assert len(w.all_rows["cn"]) == len(all_of("cn")), len(w.all_rows["cn"])
+assert len(w.all_rows["cn"]) == min(PAGE_SIZE, len(all_of("cn"))), \
+    len(w.all_rows["cn"])
 assert all(isinstance(w.stack.widget(i), QScrollArea)
            for i in range(len(MARKET_GROUPS)))
 w._switch_market("crypto")

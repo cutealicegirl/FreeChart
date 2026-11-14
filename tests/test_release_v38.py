@@ -54,7 +54,7 @@ def wait_fill(w, key, timeout=10.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         app.processEvents()
-        if key not in w._filling_all and len(w.all_rows[key]) >= len(all_of(key)):
+        if key not in w._filling_all:
             pump(0.05)
             return True
         time.sleep(0.005)
@@ -106,22 +106,30 @@ if getattr(w, "tray", None) is not None:
         pass
 
 w._switch_sub("all")
-ok("6. 切到「全部」立即进入建行期且 tooltip 抑制已开启",
-   key in w._filling_all and tooltip_hold_count() >= 1)
+from ui.main_window import PAGE_SIZE as _PAGE
+ok("6. 切到「全部」首屏按页建行（只建 PAGE_SIZE 行）并收尾计数",
+   key not in w._filling_all and tooltip_hold_count() == 0
+   and len(w.all_rows[key]) == min(_PAGE, len(all_of(key))),
+   (len(w.all_rows[key]), tooltip_hold_count()))
 
 row = next(iter(w.all_rows[key].values()), None)
 ok("7. 首屏行已创建且挂在页面下（不是无父顶层小窗）",
    row is not None and row.parent() is not None)
 
 # 关键：对「子控件」发 ToolTip 事件。旧实现只在父行 event() 里过滤，
-# 这里事件在子 QLabel 处就被消费，必然连环弹窗。
+# 这里事件在子 QLabel 处就被消费，必然连环弹窗。建行是同步的，
+# 这里手动进入一次建行期（与 _ensure_all_rows 内部同一机制）验证抑制。
 child = getattr(row, "lbl_high", None) if row is not None else None
 if child is not None:
     child.setToolTip("最高价 12345")
     QToolTip.hideText()
-    QApplication.sendEvent(
-        child, QHelpEvent(QEvent.ToolTip, QPoint(0, 0), QPoint(0, 0)))
-    pump(0.05)
+    begin_tooltip_hold()
+    try:
+        QApplication.sendEvent(
+            child, QHelpEvent(QEvent.ToolTip, QPoint(0, 0), QPoint(0, 0)))
+        pump(0.05)
+    finally:
+        end_tooltip_hold()
     ok("8. 建行期对子 QLabel 发 ToolTip 不会弹出 QTipLabel",
        not QToolTip.isVisible() and
        len(app.topLevelWidgets()) == top_before)
@@ -133,27 +141,37 @@ ok("9. 建行期不会顺带触发资料弹窗 / 看板娘气泡 / 托盘通知"
    spy["mascot"] == 0 and spy["info"] == 0 and
    spy["detail"] == 0 and spy["tray"] == 0, spy)
 
-ok("10. 分批链能正常跑完（全部行创建完毕）", wait_fill(w, key))
+ok("10. 建行链能正常跑完（首屏行创建完毕、标记释放）", wait_fill(w, key))
 ok("11. 收尾释放填充标记与 tooltip 抑制",
    key not in w._filling_all and tooltip_hold_count() == 0)
 ok("12. 全过程中没有新增顶层窗口（连环弹窗 / 抖动已消除）",
    len(app.topLevelWidgets()) == top_before)
 
-# ---------- 3. 多市场并行建行：引用计数不得被提前打开 ----------
+# ---------- 3. 建行链引用计数：建行期间每链各持一条，结束精确归零 ----------
 others = [k for k in w.pages if k != key and not w.all_rows[k]]
-for k in others:
-    w._sub_tabs[k] = "all"
-    w._ensure_all_rows(k)
-ok("13. 多市场并行建行时每个链各持一个计数",
-   len(others) >= 2 and tooltip_hold_count() == len(others),
-   "others=%d hold=%d" % (len(others), tooltip_hold_count()))
+holds = []
+_orig_create = w._create_all_rows
+
+
+def _spy_create(k, syms):
+    holds.append(tooltip_hold_count())   # 建行进行中应恰有一条抑制计数
+    return _orig_create(k, syms)
+
+
+w._create_all_rows = _spy_create
+try:
+    for k in others:
+        w._sub_tabs[k] = "all"
+        w._ensure_all_rows(k)
+finally:
+    w._create_all_rows = _orig_create
+ok("13. 每个市场建行期间各持一条 tooltip 抑制计数",
+   len(others) >= 2 and holds and all(h == 1 for h in holds),
+   "others=%d holds=%r" % (len(others), holds))
 begin_tooltip_hold()
 ok("14. 新增一条建行链会叠加计数，互不覆盖",
-   tooltip_hold_count() == len(others) + 1,
-   "hold=%d" % tooltip_hold_count())
+   tooltip_hold_count() == 1, "hold=%d" % tooltip_hold_count())
 end_tooltip_hold()
-for k in others:
-    wait_fill(w, k)
 ok("15. 所有链结束后引用计数精确归零",
    tooltip_hold_count() == 0 and not any(w._filling_all))
 
