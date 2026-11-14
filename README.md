@@ -1,13 +1,26 @@
 # Free Chart
 
+[![Latest Release](https://img.shields.io/github/v/release/cutealicegirl/FreeChart?label=最新版本)](https://github.com/cutealicegirl/FreeChart/releases)
+[![Downloads](https://img.shields.io/github/downloads/cutealicegirl/FreeChart/total?label=下载量)](https://github.com/cutealicegirl/FreeChart/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2B%20%7C%20Android%2010%2B-blue)](https://github.com/cutealicegirl/FreeChart)
+
 全市场行情与品种档案 · 自由缩放 K 线（Windows 桌面版 + Android 10+）。
 覆盖加密货币 / A股 / 港股 / 美股 / 链上合约，并提供品种发展历程与详情档案。
 用户可见名称与交付文件名统一为 `Free Chart`（EXE / APK / 启动器 / 自启项名）。
 仅保留不可见的技术 ID `CryptoTicker`：APK 包名、配置与缓存目录、单实例锁名，
-用于兼容覆盖升级；另保留一份同内容的 `dist/CryptoTicker.exe` 兼容更名前已建的快捷方式。
+用于兼容覆盖升级。
 
 - 技术栈：Python 3.11+ / PySide6 / requests，图表与控件全部 QPainter 自绘
 - 特点：深色金融终端风格、常驻桌面、低资源占用、多数据源自动切换
+
+## 下载
+
+- **Windows 安装包（推荐）**：[FreeChart-Setup-1.0.0.exe](https://github.com/cutealicegirl/FreeChart/releases/download/v1.0.0/FreeChart-Setup-1.0.0.exe)
+  —— 双击安装，自动创建「开始菜单 / 桌面」快捷方式并支持卸载。
+- 历史版本与源码见 [Releases](https://github.com/cutealicegirl/FreeChart/releases)。
+
+> 想从源码自行构建？见下方「打包 / 制作安装包」。
 
 ## 主要功能
 
