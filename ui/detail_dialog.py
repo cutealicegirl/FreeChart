@@ -13,7 +13,7 @@ Ticker，所以详情页里的数字与列表、图表完全一致。
 """
 import threading
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, QRect, Qt, Signal
 from PySide6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QSizeGrip, QPushButton, QScrollArea,
                                QVBoxLayout, QWidget)
@@ -76,6 +76,18 @@ def _fmt_shares(v) -> str:
     if v >= 1e4:
         return f"{v / 1e4:.0f}万"
     return f"{v:,.0f}"
+
+
+def _money(v, symbol: str) -> str:
+    """金额（市值 / 成交额）：带计价货币 + 万亿/亿/万 单位。
+
+    例：加密货币 / 美股 -> $1.45万亿 / $8.9万；A股 -> ¥3721亿；
+    港股 -> HK$45.2亿。单位（货币 + 量级）标注清楚，绝不只给裸数字。
+    """
+    base = _fmt_cap(v)
+    if base == "—":
+        return "—"
+    return units.unit_of(symbol) + base
 
 
 class _Worker(threading.Thread):
@@ -157,6 +169,8 @@ class SymbolDetailDialog(QDialog):
         # 无边框窗口没有原生标题栏，需要自己实现拖动 + 让出最小尺寸，
         # 否则小屏上窗口可能卡在屏幕外 / 内容被切掉且无法拉伸查看。
         self._drag = None
+        self._resize = None
+        self._resize_start = (None, None)
         self._head = None
         self._close_btn = None
         self.symbol = symbol or ""
@@ -176,7 +190,7 @@ class SymbolDetailDialog(QDialog):
         w = int(getattr(owner, "width", lambda: 480)() or 480)
         h = int(getattr(owner, "height", lambda: 820)() or 820)
         self.resize(max(380, min(620, w - 24)), max(460, min(800, h - 40)))
-        self.setMinimumSize(380, 460)
+        self.setMinimumSize(400, 500)
         # 居中到父窗口，避免无边框窗口默认出现在屏幕角落 / 被主窗遮挡
         if isinstance(owner, QWidget) and not owner.isHidden():
             pr = owner.geometry()
@@ -347,6 +361,9 @@ class SymbolDetailDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 竖向滚动条按需出现：内容高于窗口时一定可以滚到全部内容，
+        # 解决「详情内容被遮挡、看不到底部」的问题。
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
 
@@ -468,7 +485,7 @@ class SymbolDetailDialog(QDialog):
         amp = ((high - low) / low * 100.0) if (low > 0 and high > 0) else 0.0
         self._quote_cells["amp"].set(f"{amp:.2f}%" if amp else "—")
         self._quote_cells["vol"].set(
-            format_volume(vol) if vol else "—")
+            _money(vol, sym) if vol else "—")
         unit = {"cn": "人民币 ¥", "hk": "港币 HK$",
                 "us": "美元 $", "crypto": "美元 $"}.get(market_of(sym), "—")
         self._quote_cells["unit"].set(unit)
@@ -682,8 +699,8 @@ class SymbolDetailDialog(QDialog):
         if not fcap and price and prof.get("float_shares"):
             fcap = float(prof["float_shares"]) * price
         rank = prof.get("rank") or 0
-        self._fund_cells["cap"].set(_fmt_cap(cap))
-        self._fund_cells["fcap"].set(_fmt_cap(fcap))
+        self._fund_cells["cap"].set(_money(cap, self.symbol))
+        self._fund_cells["fcap"].set(_money(fcap, self.symbol))
         pe = prof.get("pe")
         self._fund_cells["pe"].set(
             f"{float(pe):.2f}" if pe else ("—" if market_of(self.symbol)
@@ -792,6 +809,13 @@ class SymbolDetailDialog(QDialog):
                           - self.frameGeometry().topLeft())
             event.accept()
             return
+        edges = self._edges_at(event.pos())
+        if edges:
+            self._resize = edges
+            self._resize_start = (event.globalPosition().toPoint(),
+                                  self.geometry())
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -799,8 +823,96 @@ class SymbolDetailDialog(QDialog):
             self.move(event.globalPosition().toPoint() - self._drag)
             event.accept()
             return
+        if self._resize is not None and event.buttons() & Qt.LeftButton:
+            self._apply_resize(event.globalPosition().toPoint())
+            event.accept()
+            return
+        # 悬停时给出边缘缩放光标提示（无边框窗口也要能直观缩放）
+        if self._drag is None and self._resize is None:
+            self._set_edge_cursor(self._edges_at(event.pos()))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         self._drag = None
+        self._resize = None
+        self.unsetCursor()
         super().mouseReleaseEvent(event)
+
+    # ------------------------------------------------- 边缘缩放 / 屏幕钳制
+    _EDGE = 6
+
+    def _edges_at(self, pos) -> int:
+        """鼠标所在窗口边缘的 Qt.Edges 组合（0 表示不在边缘）。"""
+        r = self.rect()
+        x, y = pos.x(), pos.y()
+        edges = 0
+        if x <= self._EDGE:
+            edges |= Qt.LeftEdge
+        if x >= r.width() - self._EDGE:
+            edges |= Qt.RightEdge
+        if y <= self._EDGE:
+            edges |= Qt.TopEdge
+        if y >= r.height() - self._EDGE:
+            edges |= Qt.BottomEdge
+        return edges
+
+    def _set_edge_cursor(self, edges):
+        if edges in (Qt.LeftEdge | Qt.TopEdge, Qt.RightEdge | Qt.BottomEdge):
+            self.setCursor(Qt.SizeFDiagCursor)
+        elif edges in (Qt.RightEdge | Qt.TopEdge, Qt.LeftEdge | Qt.BottomEdge):
+            self.setCursor(Qt.SizeBDiagCursor)
+        elif edges & (Qt.LeftEdge | Qt.RightEdge):
+            self.setCursor(Qt.SizeHorCursor)
+        elif edges & (Qt.TopEdge | Qt.BottomEdge):
+            self.setCursor(Qt.SizeVerCursor)
+        else:
+            self.unsetCursor()
+
+    def _apply_resize(self, gpos):
+        start_pos, start_geo = self._resize_start
+        if start_pos is None or start_geo is None:
+            return
+        dx = gpos.x() - start_pos.x()
+        dy = gpos.y() - start_pos.y()
+        edges = self._resize
+        x, y = start_geo.x(), start_geo.y()
+        w, h = start_geo.width(), start_geo.height()
+        if edges & Qt.LeftEdge:
+            nw, nx = w - dx, x + dx
+        else:
+            nw, nx = w, x
+        if edges & Qt.TopEdge:
+            nh, ny = h - dy, y + dy
+        else:
+            nh, ny = h, y
+        if edges & Qt.RightEdge:
+            nw = w + dx
+        if edges & Qt.BottomEdge:
+            nh = h + dy
+        mw, mh = (self.minimumSize().width(), self.minimumSize().height())
+        if nw < mw:                      # 守住最小尺寸，左/上边缘反向补偿
+            if edges & Qt.LeftEdge:
+                nx -= (mw - nw)
+            nw = mw
+        if nh < mh:
+            if edges & Qt.TopEdge:
+                ny -= (mh - nh)
+            nh = mh
+        self.setGeometry(nx, ny, nw, nh)
+
+    def showEvent(self, event):
+        self._clamp_to_screen()
+        super().showEvent(event)
+
+    def _clamp_to_screen(self):
+        """把窗口钳制在可用屏幕内：内容永不会被屏幕边缘切掉而够不到。"""
+        sg = self.screen().availableGeometry() if self.screen() else QRect()
+        if sg.isNull():
+            return
+        g = self.geometry()
+        w = min(g.width(), sg.width())
+        h = min(g.height(), sg.height())
+        x = max(sg.x(), min(g.x(), sg.x() + sg.width() - w))
+        y = max(sg.y(), min(g.y(), sg.y() + sg.height() - h))
+        if (x, y, w, h) != (g.x(), g.y(), g.width(), g.height()):
+            self.setGeometry(x, y, w, h)

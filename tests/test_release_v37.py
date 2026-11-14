@@ -23,12 +23,13 @@ from PySide6.QtWidgets import QApplication           # noqa: E402
 app = QApplication([])
 
 from core import brand                                # noqa: E402
+from core.config import Config                        # noqa: E402
 from data import about as about_db                    # noqa: E402
 from data import fundamentals                        # noqa: E402
 from data import history_stats                        # noqa: E402
 from data import timeline as tl                       # noqa: E402
 from data.klines import Candle                        # noqa: E402
-from ui.chart_view import CandleChart                 # noqa: E402
+from ui.chart_view import CandleChart, ChartView      # noqa: E402
 from ui.detail_dialog import SymbolDetailDialog      # noqa: E402
 
 FAILS, CHECKS = [], [0]
@@ -248,6 +249,45 @@ ok("29. 缩到几根 K 线时 ATH/ATL 依旧不画",
 _psrc = inspect.getsource(CandleChart._draw_pivots)
 ok("30. LH/LL 让位逻辑同样要求真实全历史资格",
    "_extremes_trusted" in _psrc and "history_exhausted" in _psrc)
+
+# ---------------- 6b. 空响应不得当成「已回溯到上市首根」 ----------------
+# fetch_klines_before 的 exhausted = not candles：限流 / 抖动同样返回空页。
+# 一次空响应就 trust_extremes() 会把已加载区间的 LH / LL 冒充成 ATH / ATL。
+cv = ChartView(Config())
+cv._symbol = "TEST"
+cv._interval = "day"
+cv.chart.interval = "day"
+cv.chart.set_data(bars())
+cv.chart.show_extremes = True
+cv.chart.set_history_exhausted(False)
+cv._on_history("TEST", "day", [], True)
+ok("38. 单次空响应（限流 / 抖动）不把区间极值标成 ATH/ATL",
+   cv.chart._extremes_trusted is False
+   and cv.chart.history_exhausted is False,
+   (cv.chart._extremes_trusted, cv.chart.history_exhausted))
+cv._on_history("TEST", "day", [], True)
+ok("39. 连续两次空响应才确认到头并标 ATH/ATL",
+   cv.chart._extremes_trusted is True
+   and cv.chart.history_exhausted is True,
+   (cv.chart._extremes_trusted, cv.chart.history_exhausted))
+
+cv2 = ChartView(Config())
+cv2._symbol = "TEST"
+cv2._interval = "15m"
+cv2.chart.interval = "15m"
+cv2.chart.set_data(bars())
+cv2._hist_empty_streak = 1
+cv2._on_history("TEST", "15m", [], True)
+ok("40. 分钟线即使连续空响应也永不信任 ATH/ATL",
+   cv2.chart._extremes_trusted is False)
+
+ok("41. 支撑 / 阻力位仅在 4 小时级及以上周期绘制",
+   cv.chart._sr_allowed() is True
+   and CandleChart.SR_PERIODS == ("4h", "1d", "3d", "1w", "1M", "1y",
+                                  "day", "3day", "week", "month", "1year"))
+cv2.chart.interval = "15m"
+ok("42. 低时间范围（15m）支撑 / 阻力位被拒绝",
+   cv2.chart._sr_allowed() is False)
 
 # ---------------- 7. 详情抽屉新增内容 ----------------
 d = SymbolDetailDialog("BTC", "比特币")

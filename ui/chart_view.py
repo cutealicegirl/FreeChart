@@ -277,6 +277,13 @@ class CandleChart(QWidget):
     FULL_PERIODS = ("1d", "day", "3d", "3day", "1w", "week",
                     "1M", "month", "1y", "1year")
 
+    # 支撑 / 阻力位（R/S）只在 4 小时及以上的周期显示：更低周期
+    # （1m / 5m / 15m / 1h）的枢轴点本质就是可见区间的局部高低（LH/LL），
+    # 画成支撑阻力会与局部高低混淆，用户反馈低周期不需要支撑阻力线。
+    # 加密按 4h 起算；股票没有 4h，日线即等价于 4h 及以上。
+    SR_PERIODS = ("4h", "1d", "3d", "1w", "1M", "1y",
+                  "day", "3day", "week", "month", "1year")
+
     @property
     def history_exhausted(self) -> bool:
         """是否已停止回溯（不等于「已覆盖全历史」，见 _extremes_trusted）。"""
@@ -302,14 +309,27 @@ class CandleChart(QWidget):
             self.history_capped = False
 
     def trust_extremes(self) -> bool:
-        """确认当前 candles 覆盖上市以来全历史，才允许标注 ATH / ATL。"""
+        """确认当前 candles 覆盖上市以来全历史，才允许标注 ATH / ATL。
+
+        只做复核、不做宣称：必须先有真实的「回溯到头」信号
+        （_history_exhausted 已为真），再核对周期与数据，两关都过才信任。
+        修复把局部高低点 LH / LL 冒充成 ATH / ATL 的误标：
+        任何一关不过，图上极值都只按区间高低处理，宁可不标也不能标错。
+        """
         if (str(getattr(self, "interval", "")) not in self.FULL_PERIODS
-                or not self.candles):
+                or not self.candles or not self._history_exhausted):
             self._extremes_trusted = False
             return False
-        self._history_exhausted = True
         self._extremes_trusted = True
         return True
+
+    def _sr_allowed(self) -> bool:
+        """当前周期是否允许显示支撑 / 阻力位（4 小时及以上）。
+
+        低周期（1m / 5m / 15m / 1h）的枢轴点只是局部高低，不画成支撑阻力，
+        避免与 LH / LL 混淆，也避免被误读成 ATH / ATL。
+        """
+        return str(getattr(self, "interval", "")) in self.SR_PERIODS
 
     def set_data(self, candles: list):
         self._anim.stop()               # 数据整体换新，旧动画作废
@@ -1091,9 +1111,10 @@ class CandleChart(QWidget):
                        f"TREND {'UP' if a['slope'] >= 0 else 'DN'}",
                        C_ACCENT, self._axis_px(10), numeric=True, bold=True)
         groups = []
-        if self.show_res:
+        # 支撑 / 阻力位只在 4 小时及以上周期显示（低周期关掉，避免与 LH/LL 混淆）
+        if self.show_res and self._sr_allowed():
             groups.append(("R", a["res"], C_UP))
-        if self.show_sup:
+        if self.show_sup and self._sr_allowed():
             groups.append(("S", a["sup"], C_DOWN))
         for kind, group, color in groups:
             for seq, d in enumerate(group, 1):
@@ -1992,6 +2013,9 @@ class ChartView(QWidget):
         self._interval = ""
         self._worker: KlineWorker | None = None
         self._hist_worker: HistoryWorker | None = None
+        # 空响应确认计数：连续两拍空返回才认定「已回溯到上市首根」，
+        # 防止限流 / 抖动的单次空页把区间极值冒充成 ATH / ATL
+        self._hist_empty_streak = 0
         self._show_all = False
         self._last_ticker = None
         self._drawings: dict = {}
@@ -2223,9 +2247,11 @@ class ChartView(QWidget):
                 ("趋势线", "show_trend",
                  "收盘价线性回归趋势线（TREND UP / DN）", C_ACCENT),
                 ("压力位", "show_res",
-                 "枢轴高点聚类压力位 R1/R2，在对应 K 线处标价格", C_UP),
+                 "枢轴高点聚类压力位 R1/R2，在对应 K 线处标价格；"
+                 "仅 4 小时及以上周期显示（低周期不显示）", C_UP),
                 ("支撑位", "show_sup",
-                 "枢轴低点聚类支撑位 S1/S2，在对应 K 线处标价格", C_DOWN),
+                 "枢轴低点聚类支撑位 S1/S2，在对应 K 线处标价格；"
+                 "仅 4 小时及以上周期显示（低周期不显示）", C_DOWN),
                 ("ATH / ATL", "show_extremes",
                  "史高 ATH / 史低 ATL，在对应 K 线处标价格；\n"
                  "需回溯到上市首根后才显示（未回溯完时极值只是局部点）",
@@ -2720,6 +2746,7 @@ class ChartView(QWidget):
         self._set_tool("none")
         self.chart.set_drawings(self._drawings.get(symbol, []))
         self._stop_history_pump()
+        self._hist_empty_streak = 0     # 换品种：空响应确认从头计数
         # 不在换品种时复位：恢复上一次图表的缩放级别与横向位置
         self.chart.restore_view(self._view_state)
         self.chart.set_history_exhausted(False)
@@ -2972,6 +2999,7 @@ class ChartView(QWidget):
             except (AttributeError, OSError, TypeError):
                 pass
         self._stop_history_pump()
+        self._hist_empty_streak = 0     # 换周期：空响应确认从头计数
         self.chart.set_history_exhausted(False)
         # 切周期同样保留视口，不再把用户刚缩好的 K 线拉回默认 90 根
         self.chart.restore_view(self._view_state or self.chart.view_state())
@@ -2984,6 +3012,12 @@ class ChartView(QWidget):
             labels = dict((k, lb) for lb, k in intervals_for(self._symbol))
             self.lbl_interval_now.setText(labels.get(key, key))
         self._refresh_timer.start(refresh_seconds(key) * 1000)
+        # 低时间范围不开支撑 / 阻力位：按钮置灰（画线层同样已按周期门控）
+        sr_on = key in self.chart.SR_PERIODS
+        for bkey in ("show_res", "show_sup"):
+            btn = self._smart_buttons.get(bkey)
+            if btn is not None:
+                btn.setEnabled(sr_on)
         # 有本地历史就先秒开，不等网络；随后 _load() 只做新鲜度校验
         cached = kline_cache.load(self._symbol, key)
         if cached:
@@ -3164,7 +3198,8 @@ class ChartView(QWidget):
             seen = {c.ts for c in self.chart.candles}
             older = [c for c in candles if c.ts not in seen]
             if not older:
-                # 有返回但没有一根更早 -> 确实到头，避免无限空转
+                # 有返回但没有一根更早 -> 数据源确认已到上市首根，
+                # 还要经 trust_extremes() 复核周期与数据才准标 ATH / ATL
                 self.chart.set_history_exhausted(True, trusted=False)
                 self.chart.trust_extremes()
             else:
@@ -3172,13 +3207,30 @@ class ChartView(QWidget):
                                 key=lambda c: c.ts)
                 self.chart.set_data(merged)
                 kline_cache.save(symbol, interval, older)
+                self._hist_empty_streak = 0    # 拿到更早数据：空页计数清零
                 if auto_fit:
                     self._fit_all_view()
+                if exhausted:
+                    # 数据源在返回本页的同时明确说没有更早的：正面确认到头
+                    self.chart.set_history_exhausted(True, trusted=False)
+                    self.chart.trust_extremes()
+        elif self.chart.candles:
+            # 空响应：限流 / 接口抖动同样会返回空页，一次空不能当「到头」，
+            # 否则回溯途中的一次瞬时空响应就会把区间极值冒充成 ATH / ATL，
+            # 这正是 LH / LL 被误标成历史高低的原因之一。
+            # 连续两拍都拿到空才确认；期间保持「未回溯完」，定时器会再取一次。
+            self._hist_empty_streak += 1
+            if self._hist_empty_streak >= 2:
+                self.chart.set_history_exhausted(True, trusted=False)
+                self.chart.trust_extremes()
+            else:
+                self.chart.set_status(
+                    "正在确认历史边界…（连续两次空返回才认定已到上市首根）")
+                self.chart.update()
+                return
         else:
+            # 连当前 K 线都没有：无可回溯，按「未确认全历史」处理
             self.chart.set_history_exhausted(True, trusted=False)
-            self.chart.trust_extremes()
-        if exhausted:
-            self.chart.trust_extremes()
         if self.chart._extremes_trusted:
             kline_cache.save(symbol, interval, [], exhausted=True)
             self._stop_history_pump()
