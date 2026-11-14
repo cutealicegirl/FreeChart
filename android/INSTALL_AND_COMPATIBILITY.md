@@ -1,7 +1,7 @@
 # Free Chart Android 版 · 安装方法与兼容性报告
 
 > 本报告对应 **v38 交付物**：应用名与交付文件名均为 `Free Chart`、
-> versionName `1.2.0`、versionCode `6`。
+> versionName `1.3.0`、versionCode `7`。
 > 所有结论均来自本机实际执行的构建、签名、静态解析、真实接口请求与 WebView 逻辑回归；
 > **本机没有连接任何 Android 设备或可用模拟器镜像，因此没有做实机安装 / 启动测试，
 > 本报告不声称实机验证通过**。文末给出手机端自测清单。
@@ -27,7 +27,7 @@
 | SHA-256 | `31eadd17a8100146a669311c3ab9719c65746b5267f3a7e4a61adfca0e36dc93` |
 | 应用标签 | **`Free Chart`**（`aapt2 dump badging` 实测） |
 | 包名 | `com.cryptoticker.app`（保持不变，支持覆盖升级） |
-| 版本 | versionName `1.2.0` / **versionCode `6`**（v38：列表顶部自动折叠 + 图表工具条精简 + 桌面批量弹窗修复 + 交付文件名统一；versionName 与桌面端保持一致，仅递增 versionCode） |
+| 版本 | versionName `1.3.0` / **versionCode `7`**（桌面端窗口管理增强（拉伸 / 移动 / 全屏）与「全部」页按页按需加载同步发布；versionName 与桌面端保持一致，仅递增 versionCode） |
 | 最低系统 | `minSdkVersion 29`（Android 10） |
 | 目标系统 | `targetSdkVersion 34`（Android 14） |
 | 屏幕方向 | `portrait`（强制竖屏） |
@@ -66,7 +66,7 @@ v38 只改了新建 keystore 时的 CN，现有证书未重建，签名与 v37 �
 
 ```
 AndroidManifest.xml            2,664 B
-classes.dex                    9,708 B   （Java WebView 壳 + 网络/剪贴板桥，Native.version() = 1.2.0）
+classes.dex                    9,708 B   （Java WebView 壳 + 网络/剪贴板桥，Native.version() = 1.3.0）
 resources.arsc                 1,740 B   （深色启动主题 / 应用名 Free Chart / 五档图标）
 res/mipmap-*/ic_launcher.png              （5 档，48–192 px K 线图标）
 assets/www/index.html         12,088 B   （标题与顶栏为 Free Chart；列表头部包 .list-head；图表工具条合并）
@@ -112,7 +112,7 @@ adb shell am start -n com.cryptoticker.app/.MainActivity
 ### 升级 / 卸载
 
 - 升级：用**同一 keystore** 重新签名后 `adb install -r`，用户自选、置顶、排序、主题、
-  搜索历史会保留（`SharedPreferences` 不清除）。v37 → v38 是 versionCode 5 → 6 的覆盖升级，
+  搜索历史会保留（`SharedPreferences` 不清除）。v38 → v39(1.3.0) 是 versionCode 6 → 7 的覆盖升级，
   包名与签名证书均未变；文件名变了不影响覆盖安装。
 - 卸载：`adb uninstall com.cryptoticker.app` 或系统设置里卸载（在系统里找 `Free Chart`）。
 
@@ -148,11 +148,11 @@ Android 端采用：
 | 验证项 | 方法 | 结果 |
 | --- | --- | --- |
 | 资源编译 | `aapt2 compile/link` | 通过，`resources.arsc` 含 `AppTheme`、应用名 `Free Chart` |
-| Java 编译 | `javac --release 8` | 通过，无 error；`Native.version()` 返回 `1.2.0` |
+| Java 编译 | `javac --release 8` | 通过，无 error；`Native.version()` 返回 `1.3.0` |
 | DEX 转换 | `d8 --min-api 29` | 通过（`classes.dex` 9,708 B） |
 | 4 字节对齐 | `zipalign -p 4` / `zipalign -c -v 4` | 通过 |
 | APK 签名 | `apksigner sign` + `verify --verbose` | `Verifies`，**v1 回退 + v2 + v3 均存在**，签名者 1 |
-| 清单解析 | `aapt2 dump xmltree --file AndroidManifest.xml` | minSdk=29、targetSdk=34、portrait=1、versionCode=6/1.2.0、package 正确 |
+| 清单解析 | `aapt2 dump xmltree --file AndroidManifest.xml` | minSdk=29、targetSdk=34、portrait=1、versionCode=7/1.3.0、package 正确 |
 | DEX 桥方法 | `classes.dex` 字符串核对 | 桥方法全部存在 |
 | 包内资源 | `zipfile` 列举 | 276 个 www 资源（含 270 个品种 logo）+ dex + arsc 齐全，共 287 条目 |
 | 前端语法 | `node --check app.js` / `about.js` | 均通过 |
