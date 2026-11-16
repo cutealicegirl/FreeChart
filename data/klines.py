@@ -93,6 +93,15 @@ def _postprocess(symbol: str, candles: List[Candle], basis: str,
     try:
         reg = _ca.get_registry()
         actions = reg.actions_for(symbol)
+        if not price_already_adjusted:
+            # 登记库之外的拆股品种：从原始价 + 成交量跳空做双确认，
+            # 既能兜底处理未登记标的，又不会把 datasource 的 qfq 数据二次复权。
+            auto = _pa.detect_split_actions_from_prices(candles, symbol)
+            known = {(a.ex_date, getattr(a.kind, "value", a.kind))
+                     for a in actions}
+            actions = actions + [a for a in auto
+                                 if (a.ex_date,
+                                     getattr(a.kind, "value", a.kind)) not in known]
         if not actions:
             return candles
         applied: list = []

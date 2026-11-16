@@ -276,6 +276,7 @@ class TitleBar(QWidget):
         lbl = QLabel(brand.APP_NAME)
         lbl.setStyleSheet(label_qss(13, C_TEXT_MAIN, True))
         lbl.setToolTip(brand.about_text())
+        self._brand_lbl = lbl
         layout.addWidget(lbl)
         # 阶段 5：标题栏统一显示当前页面名；设置入口收到底部导航，
         # 右上角不再有重复的设置按钮，改为统一的「返回」。
@@ -284,24 +285,23 @@ class TitleBar(QWidget):
         layout.addWidget(self.lbl_page)
         layout.addStretch(1)
 
+        self._window_buttons = []
+
         def mkbtn(text, tip, danger=False):
             btn = QPushButton(text)
-            btn.setFixedSize(44, 44)      # 阶段 6：≥44px 触控目标
+            btn.setFixedSize(44, 44)      # 触控目标；窄窗口下由 set_compact 缩小
             btn.setToolTip(tip)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(icon_btn_qss(14, danger))
+            self._window_buttons.append(btn)
             return btn
 
         self.btn_back = mkbtn("←", "返回上一页")
         btn_min = mkbtn("–", "隐藏到右下角托盘")
         self.btn_max = mkbtn("□", "最大化 / 还原（双击标题栏同样生效）")
         self.btn_full = mkbtn("⛶", "全屏显示")
-        # 水平 Ignored：这两颗按钮不得把窗口最小宽度顶高（否则较窄的
-        # 记忆宽度还原不回去，图表页返回后尺寸恢复会失败）。空间够时
-        # stretch 会把它们的 sizeHint(44px) 留出来；窗口变窄时由
-        # resizeEvent 收起，不会被看到裁切。
-        self.btn_max.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        self.btn_full.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        # 窄窗口只压缩按钮，不隐藏最大化 / 全屏：用户反馈「窗口无法最大化」
+        # 正是因为旧版把这两颗按钮藏了起来，窄窗口下没有可点击入口。
         btn_close = mkbtn("×", "退出程序", danger=True)
         self.btn_back.clicked.connect(window._navigate_back)
         btn_min.clicked.connect(window.hide_to_tray)
@@ -337,16 +337,34 @@ class TitleBar(QWidget):
             self.btn_max.setToolTip("最大化 / 还原（双击标题栏同样生效）")
             self.btn_full.setToolTip("全屏显示")
 
+    def set_compact(self, compact: bool):
+        """窄窗口压缩标题栏按钮，但保留最大化 / 全屏入口。
+
+        旧版在宽度 < 440 时直接隐藏这两颗按钮，导致窄窗口下既看不到
+        也点不到最大化，用户只能靠双击标题栏（并非人人知道）。现在改为
+        缩小按钮 + 隐藏页面名，保证任何宽度都能直接最大化 / 全屏。
+        """
+        if getattr(self, "_compact", None) == bool(compact):
+            return
+        self._compact = bool(compact)
+        size = QSize(30, 36) if compact else QSize(44, 44)
+        for btn in self._window_buttons:
+            btn.setFixedSize(size)
+        if hasattr(self, "lbl_page"):
+            self.lbl_page.setVisible(not compact)
+        if hasattr(self, "_brand_lbl"):
+            # 极窄窗口再收起品牌名，给窗口按钮让位；标题栏本身仍可拖动
+            self._brand_lbl.setVisible(self.width() >= 340 or not compact)
+        lay = self.layout()
+        if lay is not None:
+            lay.setSpacing(4 if compact else 8)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # 窄窗口收起最大化 / 全屏按钮：这颗按钮的最小宽度会把整个窗口
-        # 的可恢复宽度顶高，导致记忆里较窄的窗口还原不回去。收起后
-        # 最大化仍可双击标题栏触发，全屏拉宽窗口或双击后使用。
-        narrow = self.width() < 440
-        if self.btn_max.isVisible() == narrow:
-            self.btn_max.setVisible(not narrow)
-        if self.btn_full.isVisible() == narrow:
-            self.btn_full.setVisible(not narrow)
+        self.set_compact(self.width() < 440)
+        # 极窄时品牌名也要随宽度恢复
+        if hasattr(self, "_brand_lbl") and self._compact:
+            self._brand_lbl.setVisible(self.width() >= 340)
 
     def _move_locked(self) -> bool:
         """最大化 / 全屏时不允许拖动移动窗口。"""
@@ -680,6 +698,11 @@ class MainWindow(QMainWindow):
         self.edit_search.textChanged.connect(
             lambda _: self._filter_debounce.start())
         self.edit_search.installEventFilter(self)
+        # 无边框窗口的边缘缩放：子控件铺满时 QWidget 鼠标事件拿不到边缘，
+        # 用应用级事件过滤器在任何子控件上识别边缘并交给系统原生缩放。
+        _app = QApplication.instance()
+        if _app is not None:
+            _app.installEventFilter(self)
 
         # ---- 品种资料弹窗：不占布局；右键菜单「查看资料」时浮到行旁边 ----
         self.info_panel = SymbolInfoPanel(central)
@@ -1776,33 +1799,46 @@ class MainWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
+    _RESIZE_EDGE = 6
+
+    def _frameless_resize_enabled(self) -> bool:
+        """只有无边框、非最大化 / 全屏、窗口已显示时才接管边缘缩放。"""
+        return bool(self.isVisible()
+                    and not self.isMaximized() and not self.isFullScreen()
+                    and bool(self.windowFlags() & Qt.FramelessWindowHint))
+
+    def _edges_at(self, gpos) -> Qt.Edges:
+        """全局坐标落在哪几条窗口边缘上（返回 Qt.Edges 组合，0 表示不在边缘）。"""
+        g = self.frameGeometry()
+        edges = Qt.Edges()
+        if 0 <= gpos.x() - g.left() < self._RESIZE_EDGE:
+            edges |= Qt.LeftEdge
+        if 0 <= g.right() - gpos.x() < self._RESIZE_EDGE:
+            edges |= Qt.RightEdge
+        if 0 <= gpos.y() - g.top() < self._RESIZE_EDGE:
+            edges |= Qt.TopEdge
+        if 0 <= g.bottom() - gpos.y() < self._RESIZE_EDGE:
+            edges |= Qt.BottomEdge
+        return edges
+
     def _frameless_hit_test(self):
         """鼠标是否位于无边框窗口的可缩放边缘，返回 Windows HT* 值。"""
-        m = 6                                  # 边缘热区宽度（px）
-        pos = QCursor.pos()                    # 逻辑坐标，DPI 安全
-        g = self.frameGeometry()
-        on_l = 0 <= pos.x() - g.left() < m
-        on_r = 0 <= g.right() - pos.x() < m
-        on_t = 0 <= pos.y() - g.top() < m
-        on_b = 0 <= g.bottom() - pos.y() < m
-        if not (on_l or on_r or on_t or on_b):
+        edges = self._edges_at(QCursor.pos())
+        if not edges:
             return None
-        if on_t and on_l:
-            return 13                          # HTTOPLEFT
-        if on_t and on_r:
-            return 14                          # HTTOPRIGHT
-        if on_b and on_l:
-            return 16                          # HTBOTTOMLEFT
-        if on_b and on_r:
-            return 17                          # HTBOTTOMRIGHT
-        if on_l:
-            return 10                          # HTLEFT
-        if on_r:
-            return 11                          # HTRIGHT
-        if on_t:
-            return 12                          # HTTOP
-        if on_b:
-            return 15                          # HTBOTTOM
+        combos = (
+            (Qt.TopEdge | Qt.LeftEdge, 13),      # HTTOPLEFT
+            (Qt.TopEdge | Qt.RightEdge, 14),     # HTTOPRIGHT
+            (Qt.BottomEdge | Qt.LeftEdge, 16),   # HTBOTTOMLEFT
+            (Qt.BottomEdge | Qt.RightEdge, 17),  # HTBOTTOMRIGHT
+            (Qt.LeftEdge, 10),                   # HTLEFT
+            (Qt.RightEdge, 11),                  # HTRIGHT
+            (Qt.TopEdge, 12),                    # HTTOP
+            (Qt.BottomEdge, 15),                 # HTBOTTOM
+        )
+        for mask, ht in combos:
+            if edges == mask:
+                return ht
         return None
 
     def nativeEvent(self, eventType, message):
@@ -1814,9 +1850,7 @@ class MainWindow(QMainWindow):
         """
         if (_cwin is not None
                 and eventType == b"windows_generic_MSG"
-                and self.isVisible()
-                and not self.isMaximized() and not self.isFullScreen()
-                and bool(self.windowFlags() & Qt.FramelessWindowHint)):
+                and self._frameless_resize_enabled()):
             msg = _cwin.MSG.from_address(int(message))
             if msg.message == 0x0084:          # WM_NCHITTEST
                 hit = self._frameless_hit_test()
@@ -2014,9 +2048,8 @@ class MainWindow(QMainWindow):
         stack = getattr(self, "stack", None)
         chart = getattr(self, "chart_view", None)
         if w < 440:
-            if tb is not None:
-                tb.btn_max.hide()
-                tb.btn_full.hide()
+            if tb is not None and hasattr(tb, "set_compact"):
+                tb.set_compact(True)   # 压缩按钮，不再隐藏最大化 / 全屏
             if stack is not None and chart is not None \
                     and stack.currentWidget() is chart:
                 key = self._current_market()
@@ -2299,6 +2332,21 @@ class MainWindow(QMainWindow):
                 if self.stack.currentWidget() is self.search_panel:
                     self._close_search_page()
                 return True
+        # 边缘缩放兜底：Windows 原生 hit-test 对某些 Qt 子控件 / DPI 组合
+        # 不生效时，用 QWindow.startSystemResize 在系统层完成同样的操作。
+        if (self._frameless_resize_enabled()
+                and event.type() == QEvent.MouseButtonPress
+                and event.button() == Qt.LeftButton):
+            try:
+                gpos = event.globalPosition().toPoint()
+            except AttributeError:
+                gpos = event.globalPos()
+            edges = self._edges_at(gpos)
+            if edges:
+                handle = self.windowHandle()
+                if handle is not None and hasattr(handle, "startSystemResize"):
+                    handle.startSystemResize(edges)
+                    return True
         return super().eventFilter(obj, event)
 
     # ================= 窗口设置 =================

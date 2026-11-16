@@ -200,6 +200,31 @@ b = pa.apply_adjustment(candles, eff, basis="raw", mode="backward")
 ok("后复权除权日后价 ×4", abs(b[3].close - 500) < 1e-6, f"{b[3].close}")
 ok("后复权除权日前价不变", abs(b[1].close - 500) < 1e-6, f"{b[1].close}")
 
+# ---------- 11. 未登记拆股品种的自动检测 ----------
+print("\n[11] 未登记拆股：价格 / 成交量双确认后复权")
+from data import klines as _kl
+auto_raw = [mk("2024-03-01", 100.0, 100), mk("2024-03-04", 101.0, 105),
+            mk("2024-03-05", 50.0, 220, 0.01), mk("2024-03-06", 51.0, 215, 0.01)]
+auto_events = pa.detect_split_actions_from_prices(auto_raw, "US:UNLISTED")
+ok("自动识别 1 拆 2", len(auto_events) == 1
+   and abs(auto_events[0].ratio - 2.0) < 1e-9
+   and auto_events[0].ex_date == "2024-03-05")
+auto_out = _kl._postprocess("US:UNLISTED", auto_raw, "raw")
+ok("未登记品种历史价已按拆股后处理",
+   abs(auto_out[1].close - 50.5) < 1e-6, f"{auto_out[1].close}")
+ok("未登记品种历史成交量同步放大",
+   abs(auto_out[1].volume - 210.0) < 1e-6, f"{auto_out[1].volume}")
+ok("除权日及之后价格不再重复调整",
+   abs(auto_out[2].close - 50.0) < 1e-6 and abs(auto_out[3].close - 51.0) < 1e-6)
+already_qfq = [mk("2024-03-01", 50.0, 200), mk("2024-03-04", 50.5, 210),
+               mk("2024-03-05", 50.0, 220), mk("2024-03-06", 51.0, 215)]
+ok("已前复权序列不产生自动事件",
+   not pa.detect_split_actions_from_prices(already_qfq, "US:ALREADY"))
+crash = [mk("2024-03-01", 100.0, 100), mk("2024-03-04", 101.0, 105),
+         mk("2024-03-05", 50.0, 105), mk("2024-03-06", 51.0, 110)]
+ok("价格腰斩但量未放大不误判拆股",
+   not pa.detect_split_actions_from_prices(crash, "US:CRASH"))
+
 print("\n" + "=" * 60)
 print(f"结果: {PASS} 通过 / {FAIL} 失败")
 print("=" * 60)

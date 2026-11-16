@@ -2017,10 +2017,53 @@
     }
     return eff;
   }
+  // 登记库之外的拆股品种：用「收盘价比例 + 成交量比例 + 事件后延续」三条件识别，
+  // 与桌面端 price_adjustment.detect_split_actions_from_prices 同口径。
+  var SHARE_RATIOS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 25, 30, 50, 100];
+  function detectSplitActionsFromPrices(rows) {
+    if (!rows || rows.length < 3) return [];
+    var ordered = rows.slice().sort(function (a, b) { return a.ts - b.ts; });
+    var seen = {}, out = [];
+    for (var i = 1; i < ordered.length - 1; i++) {
+      var prev = ordered[i - 1], cur = ordered[i], nxt = ordered[i + 1];
+      if (!(prev.c > 0 && cur.c > 0 && nxt.c > 0)) continue;
+      var pr = prev.c / cur.c;
+      var vr = prev.v > 0 ? cur.v / prev.v : null;
+      if (Math.abs(nxt.c / cur.c - 1) > 0.25) continue;
+      var hit = null;
+      for (var j = 0; j < SHARE_RATIOS.length; j++) {
+        var r = SHARE_RATIOS[j], inv = 1 / r;
+        if (Math.abs(pr - r) / r <= 0.10 &&
+            (vr === null || Math.abs(vr - r) / r <= 0.35 || (vr >= r * 0.6 && vr <= r * 1.8))) {
+          hit = { r: r, k: 'split' }; break;
+        }
+        if (Math.abs(pr - inv) / inv <= 0.10 &&
+            (vr === null || Math.abs(vr - inv) / inv <= 0.35 || (vr >= inv * 0.6 && vr <= inv * 1.8))) {
+          hit = { r: inv, k: 'reverse_split' }; break;
+        }
+      }
+      if (!hit) continue;
+      var d = _candleDate(cur.ts), key = d + ':' + hit.k;
+      if (seen[key]) continue;
+      seen[key] = 1;
+      out.push({ d: d, r: hit.r, k: hit.k });
+    }
+    return out;
+  }
+  function mergeActions(rows, actions) {
+    var out = (actions || []).slice(), seen = {};
+    out.forEach(function (a) { seen[a.d + ':' + a.k] = 1; });
+    detectSplitActionsFromPrices(rows).forEach(function (a) {
+      var key = a.d + ':' + a.k;
+      if (!seen[key]) { seen[key] = 1; out.push(a); }
+    });
+    return out;
+  }
   // 对原始价做前复权：除权日之前的 OHLC 乘 1/ratio，成交量乘 ratio。
   function applyAdjustment(rows, actions) {
-    if (!actions || !actions.length) return rows;
-    var eff = detectUnadjustedEvents(rows, actions);
+    var all = mergeActions(rows, actions);
+    if (!all.length) return rows;
+    var eff = detectUnadjustedEvents(rows, all);
     if (!eff.length) return rows;
     return rows.map(function (r) {
       var d = _candleDate(r.ts), pf = 1, vf = 1;
@@ -2133,7 +2176,10 @@
       var typeMap = { m1: '1', m5: '5', m15: '15', m30: '30', m60: '60' };
       return http(SINA_US_MIN + encodeURIComponent(sym.slice(3).toLowerCase()) +
         '&type=' + (typeMap[interval] || '5'))
-        .then(function (txt) { return parseSinaRows(txt, true); });
+        .then(function (txt) {
+          // 分钟线同样可能是未复权原始价，按同一套事件前复权后再展示。
+          return applyAdjustment(parseSinaRows(txt, true), CORPORATE_ACTIONS[sym]);
+        });
     }
     if (interval === 'm5' || interval === 'm15' || interval === 'm30' || interval === 'm60') {
       return http(TENCENT_KLINE + encodeURIComponent(code + ',' + interval + ',,,1000'))
@@ -3296,6 +3342,7 @@
     parseBinanceKlines: parseBinanceKlines, parseTencentKlines: parseTencentKlines,
     parseSinaRows: parseSinaRows, aggregateKlines: aggregate,
     corporateActions: CORPORATE_ACTIONS, detectUnadjustedEvents: detectUnadjustedEvents,
+    detectSplitActionsFromPrices: detectSplitActionsFromPrices, mergeActions: mergeActions,
     applyAdjustment: applyAdjustment, adjustVolumeOnly: adjustVolumeOnly,
     applyCoinLore: applyCoinLore, computeOrder: computeOrder,
     detailHTML: detailHTML, setSort: setSort, setPinned: setPinned,

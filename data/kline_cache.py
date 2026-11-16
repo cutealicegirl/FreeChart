@@ -21,9 +21,10 @@ from data.klines import Candle
 _DB_NAME = "klines.sqlite3"
 _FRESH_SECONDS = 900          # 15 分钟内直接读本地，不发 K 线请求
 # 缓存结构版本：v1 = 复权改造之前（价格/成交量口径不一致）。
-#  bump 到 v2 让所有旧缓存自动失效并重新按复权口径抓取，避免"已复权数据"
-#  与"旧未复权缓存"混用。以后每当复权算法语义变化都应 +1。
-_CACHE_SCHEMA = "v2-adjusted"
+#  bump 到 v2 让所有旧缓存自动失效并重新按复权口径抓取；
+#  v3 = 加入「未登记拆股品种」的自动检测复权，旧 v2 缓存需重建。
+# 以后每当复权算法语义变化都应 +1。
+_CACHE_SCHEMA = "v3-auto-split"
 _local = threading.local()
 
 

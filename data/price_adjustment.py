@@ -37,7 +37,7 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-from data.corporate_actions import CorporateAction
+from data.corporate_actions import ActionType, CorporateAction
 
 RAW = "raw"
 FORWARD = "forward"
@@ -235,6 +235,72 @@ def detect_unadjusted_events(candles: list, actions: Sequence[CorporateAction],
             # 保守跳过，标记交给 detect_anomalies
             continue
     return effective
+
+
+_COMMON_SHARE_RATIOS = (
+    2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0,
+    20.0, 25.0, 30.0, 50.0, 100.0,
+)
+
+
+def detect_split_actions_from_prices(candles: list, symbol: str,
+                                     source: str = "自动检测：价格/成交量双确认",
+                                     price_tol: float = 0.10,
+                                     volume_tol: float = 0.35) -> List[CorporateAction]:
+    """从**未复权**价格序列识别拆股 / 反向拆股（登记库之外品种的兜底）。
+
+    只认同时满足三个条件的事件，宁可漏标也不猜测：
+      1. 相邻两根收盘价之比接近常见份额比例（2/3/4/5/10/20…或其倒数），
+         容差 10%；
+      2. 成交量同步按同比例放大 / 缩小（容差 50%，兼容市场波动）；
+      3. 事件后一根 K 线之后价格延续，不是单日闪崩 / 暴涨。
+
+    已由数据源前复权的序列不会出现这种跳空，因此本函数天然不会二次复权。
+    返回的是标准 CorporateAction，可直接并入 apply_adjustment 的事件列表。
+    """
+    ordered = sorted(candles, key=lambda c: c.ts)
+    if len(ordered) < 3:
+        return []
+    out: List[CorporateAction] = []
+    seen = set()
+    for i in range(1, len(ordered) - 1):
+        prev, cur, nxt = ordered[i - 1], ordered[i], ordered[i + 1]
+        try:
+            if not (prev.close > 0 and cur.close > 0 and nxt.close > 0):
+                continue
+            price_ratio = prev.close / cur.close
+            vol_ratio = ((cur.volume or 0.0) / (prev.volume or 0.0)
+                         if (prev.volume or 0.0) > 0 else None)
+            nxt_ratio = nxt.close / cur.close
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+        if abs(nxt_ratio - 1.0) > 0.25:   # 事件后不延续 -> 不是拆股
+            continue
+        hit = None
+        for r in _COMMON_SHARE_RATIOS:
+            if abs(price_ratio - r) / r <= price_tol:
+                if (vol_ratio is None or abs(vol_ratio - r) / r <= volume_tol
+                        or 0.6 * r <= vol_ratio <= 1.8 * r):
+                    hit = (r, ActionType.SPLIT)
+                    break
+            inv = 1.0 / r
+            if abs(price_ratio - inv) / inv <= price_tol:
+                if (vol_ratio is None or abs(vol_ratio - inv) / inv <= volume_tol
+                        or 0.6 * inv <= vol_ratio <= 1.8 * inv):
+                    hit = (inv, ActionType.REVERSE_SPLIT)
+                    break
+        if hit is None:
+            continue
+        d = _date_of_ts(cur.ts)
+        if not d or (d, hit[1].value) in seen:
+            continue
+        seen.add((d, hit[1].value))
+        vr = "未知" if vol_ratio is None else f"{vol_ratio:.2f}"
+        out.append(CorporateAction(
+            symbol=symbol, ex_date=d, kind=hit[1], ratio=hit[0],
+            source=source, confidence="verified",
+            note=f"自动检测：收盘价比 {price_ratio:.3g}，量比 {vr}"))
+    return out
 
 
 def detect_anomalies(candles: list, actions: Sequence[CorporateAction],

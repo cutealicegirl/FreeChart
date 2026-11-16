@@ -117,7 +117,9 @@ ok('中间段仅 /4', Math.abs(mAdj[2].c - 125) < 1e-6, 'c=' + mAdj[2].c);
 console.log('[5] 幂等与保守');
 const already = [mk('2020-08-28', 125, 400), mk('2020-08-31', 125, 100), mk('2020-09-01', 126, 110)];
 ok('已复权数据不二次复权', D.detectUnadjustedEvents(already, aaplActs).length === 0);
-ok('无事件标的不变', D.applyAdjustment(unadj, undefined)[1].c === 500);
+const noEvent = [mk('2022-01-04', 100, 100), mk('2022-01-05', 101, 105),
+  mk('2022-01-06', 102, 110)];
+ok('无事件标的不变', D.applyAdjustment(noEvent, undefined)[1].c === 101);
 ok('qfq成交量补齐：AAPL无分红登记时不误改量', D.adjustVolumeOnly(unadj, 'US:AAPL')[1].v === 400);
 
 // [6] 多周期聚合用复权后日线
@@ -126,6 +128,22 @@ const week = D.aggregateKlines([mk('2024-01-01', 10, 100), mk('2024-01-02', 12, 
   mk('2024-01-03', 11, 105), mk('2024-01-08', 13, 120)], 'week', 'day');
 ok('周K 聚合 high=12', week.length === 2 && Math.abs(week[0].h - 12) < 1e-9, 'h=' + (week[0] && week[0].h));
 ok('周K 聚合 volume=315', Math.abs(week[0].v - 315) < 1e-9, 'v=' + week[0].v);
+
+// [7] 未登记拆股：价格/成交量双确认
+console.log('[7] 未登记拆股自动检测');
+const autoRaw = [mk('2024-03-01', 100, 100), mk('2024-03-04', 101, 105),
+  mk('2024-03-05', 50, 220), mk('2024-03-06', 51, 215)];
+const autoEv = D.detectSplitActionsFromPrices(autoRaw);
+ok('识别未登记 1拆2', autoEv.length === 1 && Math.abs(autoEv[0].r - 2) < 1e-9);
+const autoOut = D.applyAdjustment(autoRaw, undefined);
+ok('未登记拆股历史价已调整', Math.abs(autoOut[1].c - 50.5) < 1e-6, 'c=' + autoOut[1].c);
+ok('未登记拆股历史量已调整', Math.abs(autoOut[1].v - 210) < 1e-6, 'v=' + autoOut[1].v);
+const alreadyQfq = [mk('2024-03-01', 50, 200), mk('2024-03-04', 50.5, 210),
+  mk('2024-03-05', 50, 220), mk('2024-03-06', 51, 215)];
+ok('已前复权序列不重复处理', D.detectSplitActionsFromPrices(alreadyQfq).length === 0);
+const crash = [mk('2024-03-01', 100, 100), mk('2024-03-04', 101, 105),
+  mk('2024-03-05', 50, 105), mk('2024-03-06', 51, 110)];
+ok('放量不足的价格腰斩不误判', D.detectSplitActionsFromPrices(crash).length === 0);
 
 console.log('\n=== 结果: ' + pass + ' 通过 / ' + fail + ' 失败 ===');
 process.exit(fail === 0 ? 0 : 1);
