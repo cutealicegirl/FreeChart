@@ -171,6 +171,10 @@ def main():
     else:
         # 构造期间窗口被 WA_DontShowOnScreen 压住，这里才让它上屏
         window.prepare_show()
+    # 启动时后台裁剪过旧的 K 线缓存，避免历史数据库无限增长
+    import threading
+    from data import kline_cache
+    threading.Thread(target=kline_cache.prune, daemon=True).start()
     # 后台把主流品种的历史 K 线批量落盘，之后浏览直接读本地 SQLite
     window.start_prefetch()
     # 股票真实 logo（公司标志 / 品牌商标）：后台串行抓取并缓存

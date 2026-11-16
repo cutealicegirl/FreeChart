@@ -175,3 +175,54 @@ def clear(symbol: str | None = None):
         conn.execute("DELETE FROM candles")
         conn.execute("DELETE FROM meta")
     conn.commit()
+
+
+# ---------------- 存储容量管理 ----------------
+# 每个（品种, 周期）保留的最大根数。分钟线按 10000 根 ≈ 7 个月的 1m 数据，
+# 足够缩放回溯，又不让数据库无限增长。首次配置时在后台 prune 一次即可。
+_MAX_BARS_PER_SERIES = 10000
+
+
+def prune(max_bars: int = _MAX_BARS_PER_SERIES) -> int:
+    """裁剪每个（品种, 周期）过旧的 K 线，只保留最近 max_bars 根。
+
+    返回删除的行数。按 ts 倒序保留最新，避免删掉用户正在看的最近历史。
+    exhausted 标记一并清除（历史被裁剪后不再是「到上市首根」）。
+    """
+    conn = _conn()
+    removed = 0
+    keys = conn.execute("SELECT DISTINCT symbol, interval FROM candles").fetchall()
+    for symbol, interval in keys:
+        total = count(symbol, interval)
+        if total <= max_bars:
+            continue
+        cutoff = conn.execute(
+            "SELECT ts FROM candles WHERE symbol=? AND interval=? "
+            "ORDER BY ts DESC LIMIT 1 OFFSET ?",
+            (symbol, interval, max_bars - 1)).fetchone()
+        if not cutoff:
+            continue
+        cur = conn.execute(
+            "DELETE FROM candles WHERE symbol=? AND interval=? AND ts<?",
+            (symbol, interval, cutoff[0]))
+        removed += cur.rowcount
+        conn.execute(
+            "UPDATE meta SET exhausted=0 WHERE symbol=? AND interval=?",
+            (symbol, interval))
+    if removed:
+        conn.commit()
+    return removed
+
+
+def stats() -> dict:
+    """缓存统计：品种数、序列数、K 线总根数、数据库文件字节数。"""
+    conn = _conn()
+    series = conn.execute("SELECT COUNT(*) FROM meta").fetchone()[0]
+    symbols = conn.execute(
+        "SELECT COUNT(DISTINCT symbol) FROM candles").fetchone()[0]
+    bars = conn.execute("SELECT COUNT(*) FROM candles").fetchone()[0]
+    try:
+        size = os.path.getsize(db_path())
+    except OSError:
+        size = 0
+    return {"symbols": symbols, "series": series, "bars": bars, "bytes": size}

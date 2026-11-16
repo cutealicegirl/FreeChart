@@ -591,6 +591,13 @@
   var OC_HIST = readJSON('ct_oc_hist', {});
   var OC_HIST_MAX = 720;
   var _ocBusy = false, _ocLast = 0;
+  var _ocPending = {};   // busy 期间被强制请求的品种，完成后立即补取，避免首屏空采样
+
+  function drawOnchainFallbackNote() {
+    var src = OC_SOURCE;
+    $('chartNote').textContent = '链上历史 K 线数据源暂不可用 · 显示本设备真实报价走势（' +
+      src + ' 采样）· 无 OHLC / 成交量 · 网络恢复后自动重试';
+  }
 
   function ocSeries(sym) {
     var a = OC_HIST[sym];
@@ -687,7 +694,12 @@
   }
 
   function refreshOnchain(syms, force) {
-    if (!syms || !syms.length || _ocBusy) return Promise.resolve(0);
+    if (!syms || !syms.length) return Promise.resolve(0);
+    if (_ocBusy) {
+      // 有请求在途：强制请求记入待办，完成后补取；普通请求直接跳过。
+      if (force) { for (var pi = 0; pi < syms.length; pi++) _ocPending[syms[pi]] = 1; }
+      return Promise.resolve(0);
+    }
     if (!force && Date.now() - _ocLast < 60000) return Promise.resolve(0);
     _ocBusy = true; _ocLast = Date.now();
     // 记录发起时的图表请求序号：回调里据此判断图表是否需要跟着重绘，
@@ -731,7 +743,16 @@
         setStatus('● 链上报价已更新 · ' + OC_SOURCE + ' · ' + fmtTime(TICKER_ASOF), false);
       }
       return n;
-    }).catch(function () { _ocBusy = false; return 0; });
+    }).catch(function () {
+      _ocBusy = false;
+      return 0;
+    }).then(function (n) {
+      // 补取 busy 期间被强制请求的品种（首屏快照竞态修复）
+      var pending = Object.keys(_ocPending);
+      _ocPending = {};
+      if (pending.length) setTimeout(function () { refreshOnchain(pending, true); }, 300);
+      return n;
+    });
   }
 
   function addContract(addr) {
@@ -1917,16 +1938,144 @@
     $('detailSheet').setAttribute('data-sym', sym);
   }
 
+  // ===================== 链上标的历史 K 线（真实 DEX OHLCV） =====================
+  // 与桌面端 data/onchain_kline.py 同口径：GeckoTerminal 主源 + CoinGecko 备源，
+  // 只取真实 OHLCV，拿不到就回退采样折线，绝不插值 / 伪造。
+  var GT_BASE = 'https://api.geckoterminal.com/api/v2';
+  var CG_OHLC = 'https://api.coingecko.com/api/v3/coins/{p}/contract/{a}/ohlc';
+  var OC_KLINE_CACHE = readJSON('ct_oc_kline', {});   // { sym|iv: {bars, pool, ts} }
+  var OC_POOL_CACHE = readJSON('ct_oc_pools', {});     // { addr: {net, pool, ts} }
+  var OC_TF = {
+    '1m': ['minute', 1], '5m': ['minute', 5], '15m': ['minute', 15],
+    '30m': ['minute', 30], '1h': ['hour', 1], '4h': ['hour', 4],
+    '1d': ['day', 1], '3d': ['day', 3], '1w': ['week', 1], '1M': ['month', 1]
+  };
+  var OC_TF_SEC = {
+    '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600,
+    '4h': 14400, '1d': 86400, '3d': 259200, '1w': 604800, '1M': 2592000
+  };
+  var OC_INTERVALS = [['1分', '1m'], ['5分', '5m'], ['15分', '15m'],
+                      ['30分', '30m'], ['1时', '1h'], ['4时', '4h'],
+                      ['日K', '1d'], ['3日', '3d'], ['周K', '1w'], ['月K', '1M']];
+  var OC_STATUS = {};   // { sym: {state, source, ts} } 最近一次获取状态
+
+  function ocCacheKey(sym, iv) { return sym + '|' + iv; }
+
+  // 标准化：[ts,o,h,l,c,v] → candle；自动识别秒/毫秒、校验 OHLC、去重排序
+  function ocNormalize(rows, interval) {
+    var out = [];
+    for (var i = 0; i < (rows || []).length; i++) {
+      var r = rows[i];
+      if (!Array.isArray(r) || r.length < 5) continue;
+      var ts = Number(r[0]), o = Number(r[1]), h = Number(r[2]),
+          l = Number(r[3]), c = Number(r[4]), v = (r[5] != null) ? Number(r[5]) : 0;
+      if (ts > 1e14) ts = ts / 1e6; else if (ts > 1e11) ts = ts / 1e3;
+      if (!(ts > 0 && o > 0 && h > 0 && l > 0 && c > 0)) continue;
+      if (h + 1e-12 < Math.max(o, c) || l - 1e-12 > Math.min(o, c) || h < l) continue;
+      if (v < 0 || !isFinite(v)) continue;
+      if (OC_TF_SEC[interval]) ts = Math.floor(ts / OC_TF_SEC[interval]) * OC_TF_SEC[interval];
+      out.push(candle(ts, o, h, l, c, v, interval));
+    }
+    out.sort(function (a, b) { return a.ts - b.ts; });
+    var seen = {}, uniq = [];
+    for (var j = 0; j < out.length; j++) {
+      if (!seen[out[j].ts]) { seen[out[j].ts] = 1; uniq.push(out[j]); }
+      else uniq[uniq.length - 1] = out[j];   // 同 ts 保留最后
+    }
+    return uniq;
+  }
+
+  // 解析交易池：全局搜索选流动性最高的池，结果落 localStorage 缓存
+  function ocResolvePool(addr) {
+    var hit = OC_POOL_CACHE[addr];
+    if (hit && hit.net && hit.pool && Date.now() - (hit.ts || 0) < 6 * 3600 * 1000) {
+      return Promise.resolve(hit);
+    }
+    return http(GT_BASE + '/search/pools?query=' + encodeURIComponent(addr) + '&page=1')
+      .then(function (txt) {
+        var d = JSON.parse(txt), best = null;
+        var rows = (d && d.data) || [];
+        for (var i = 0; i < rows.length; i++) {
+          var id = String(rows[i].id || ''), at = rows[i].attributes || {};
+          var liq = Number(at.reserve_in_usd || 0), k = id.indexOf('_');
+          if (k <= 0) continue;
+          if (!best || liq > best.liq) {
+            best = { net: id.slice(0, k), pool: id.slice(k + 1), liq: liq, ts: Date.now() };
+          }
+        }
+        if (best) { OC_POOL_CACHE[addr] = best; writeJSON('ct_oc_pools', OC_POOL_CACHE); }
+        return best;
+      }).catch(function () { return null; });
+  }
+
+  function ocFetchGecko(addr, interval) {
+    var tfAgg = OC_TF[interval] || ['hour', 1];
+    return ocResolvePool(addr).then(function (pool) {
+      if (!pool) throw new Error('未找到公开 DEX 交易池');
+      var url = GT_BASE + '/networks/' + encodeURIComponent(pool.net) +
+        '/pools/' + encodeURIComponent(pool.pool) + '/ohlcv/' + tfAgg[0] +
+        '?aggregate=' + tfAgg[1] + '&limit=1000&currency=usd&page=1';
+      return http(url).then(function (txt) {
+        var d = JSON.parse(txt);
+        var attrs = (d && d.data && d.data.attributes) || {};
+        return ocNormalize(attrs.ohlcv_list || [], interval);
+      });
+    });
+  }
+
+  function ocFetchCoingecko(addr, interval) {
+    var chain = isSolanaAddr(addr) ? 'solana' : (addr.charAt(0) === 'T' ? 'tron' : 'ethereum');
+    var url = CG_OHLC.replace('{p}', chain).replace('{a}', encodeURIComponent(addr)) +
+      '?vs_currency=usd&days=365';
+    return http(url).then(function (txt) {
+      var rows = JSON.parse(txt);
+      // CoinGecko 无成交量：v=0（界面据此不画量柱）
+      var six = (rows || []).map(function (r) {
+        return [r[0], r[1], r[2], r[3], r[4], 0];
+      });
+      return ocNormalize(six, '1d');
+    });
+  }
+
+  // 统一入口：缓存命中优先 → 主源 → 备源 → 失败抛错（由 loadChart 回退采样）
+  function fetchOnchainCandles(sym, interval) {
+    var addr = ocAddr(sym), key = ocCacheKey(sym, interval);
+    var cached = OC_KLINE_CACHE[key];
+    if (cached && cached.bars && cached.bars.length &&
+        Date.now() - (cached.ts || 0) < 15 * 60 * 1000) {
+      OC_STATUS[sym] = { state: 'cache', source: cached.source || '本地缓存', ts: cached.ts };
+      return Promise.resolve(cached.bars);
+    }
+    return ocFetchGecko(addr, interval).catch(function () {
+      return ocFetchCoingecko(addr, interval);
+    }).then(function (bars) {
+      if (!bars || !bars.length) throw new Error('数据源未返回历史数据');
+      // 增量合并：与本地缓存按 ts 去重（保留最新真实值）
+      var merged = {}, all = (cached && cached.bars || []).concat(bars);
+      for (var i = 0; i < all.length; i++) merged[all[i].ts] = all[i];
+      var final = Object.keys(merged).map(function (k) { return merged[k]; })
+        .sort(function (a, b) { return a.ts - b.ts; });
+      if (final.length > 10000) final = final.slice(final.length - 10000);
+      OC_KLINE_CACHE[key] = { bars: final, source: 'DEX OHLCV', ts: Date.now() };
+      writeJSON('ct_oc_kline', OC_KLINE_CACHE);
+      OC_STATUS[sym] = { state: 'ok', source: 'DEX OHLCV', ts: Date.now() };
+      return final;
+    });
+  }
+
   // ===================== K 线 =====================
   function intervalsFor(sym) {
-    if (isOnchain(sym)) return [];      // 链上币种没有 K 线周期
+    if (isOnchain(sym)) return OC_INTERVALS;   // 链上真实 DEX K 线周期
     var mk = marketOf(sym);
     if (mk === 'crypto') return CRYPTO_INTERVALS;
     if (mk === 'cn') return CN_MINUTES.concat(STOCK_INTERVALS);
     if (mk === 'us') return US_MINUTES.concat(STOCK_INTERVALS);
     return STOCK_INTERVALS;                  // 港股：仅日线及以上（腾讯 hkfqkline 无分钟线）
   }
-  function defaultInterval(sym) { return marketOf(sym) === 'crypto' ? '15m' : 'day'; }
+  function defaultInterval(sym) {
+    if (isOnchain(sym)) return '1h';
+    return marketOf(sym) === 'crypto' ? '15m' : 'day';
+  }
   function labelFor(ts, interval) {
     var d = new Date(ts * 1000);
     function p(x) { return (x < 10 ? '0' : '') + x; }
@@ -2244,13 +2393,25 @@
     var seq = ++chartLoadSeq;
     var sym = CHART_SYMBOL, iv = CHART_INTERVAL;
     if (isOnchain(sym)) {
-      // 没有交易所 K 线：画本设备采集的真实报价走势 + 真实链上结构数据，
-      // 明确标注「非 K 线」；不发必然失败的 K 线请求，也不画假蜡烛。
+      // 先尝试真实 DEX 历史 K 线（GeckoTerminal / CoinGecko）；拿到就画蜡烛，
+      // 拿不到才回退到本设备真实报价采样折线，绝不画假 K 线。
+      $('chartNote').textContent = '正在加载链上历史 K 线（' + iv + '）…';
       CANDLES = [];
-      $('chartNote').textContent = '链上真实报价走势（本设备采样）· 来源 ' +
-        OC_SOURCE + ' · 非交易所 K 线，无 OHLC / 成交量';
       drawChart();
-      refreshOnchain([sym], true);   // 打开时取一次真实快照
+      refreshOnchain([sym], true);   // 同时取一次真实报价快照（含首次兜底数据）
+      fetchOnchainCandles(sym, iv).then(function (rows) {
+        if (!chartLoadIsCurrent(seq, sym, iv)) return;
+        CANDLES = rows || [];
+        VIEW.count = clamp(VIEW.count || 90, 20, 400);
+        $('chartNote').textContent = '共 ' + CANDLES.length + ' 根真实 DEX K 线 · 左右拖动 · ＋/－ 缩放';
+        drawChart();
+      }).catch(function (e) {
+        if (!chartLoadIsCurrent(seq, sym, iv)) return;
+        // 回退：本设备采集的真实报价走势（非 K 线，明确标注）
+        CANDLES = [];
+        drawOnchainFallbackNote();
+        drawChart();
+      });
       return;
     }
     $('chartNote').textContent = '正在加载 ' + sym + ' K 线（' + iv + '）…';
@@ -2425,7 +2586,8 @@
     var fpx = Math.round(10 * scale);
     g.clearRect(0, 0, w, h);
     g.font = fpx + 'px sans-serif';
-    if (isOnchain(CHART_SYMBOL)) {
+    if (isOnchain(CHART_SYMBOL) && !CANDLES.length) {
+      // 只有确实没有真实 K 线时才画本设备报价采样折线（非 K 线）
       drawOnchainChart(g, w, h, fpx, colText, colSub, colLine,
         css.getPropertyValue('--accent').trim() || '#f0b90b');
       return;
@@ -3358,6 +3520,11 @@
     rowHTML: rowHTML, renderList: renderList, scheduleRender: scheduleRender,
     loadChart: loadChart, applyTickers: applyTickers, quoteIsStale: _quoteIsStale,
     updateChartHead: updateChartHead, intervalsFor: intervalsFor,
+    // 链上真实历史 K 线（DEX OHLCV）
+    ocNormalize: ocNormalize, fetchOnchainCandles: fetchOnchainCandles,
+    ocFetchGecko: ocFetchGecko, ocFetchCoingecko: ocFetchCoingecko,
+    ocCacheKey: ocCacheKey, defaultInterval: defaultInterval,
+    OC_STATUS: OC_STATUS, OC_KLINE_CACHE: OC_KLINE_CACHE,
     // v34：指标参数 / 搜索独立页 / 自由平移 / 图标
     normInd: normInd, indParams: indParams, writeIndParams: writeIndParams,
     resetIndParams: resetIndParams, maSeries: maSeries, emaSeries: emaSeries,

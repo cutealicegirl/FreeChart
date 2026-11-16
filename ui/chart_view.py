@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
 
 from core import indicator_params, onchain_history
 from core.thread_cleanup import safe_stop_thread
-from data import kline_cache, onchain
+from data import kline_cache, onchain, onchain_kline
 from data.klines import (HistoryWorker, KlineWorker, default_interval,
                          intervals_for, refresh_seconds)
 from ui.theme import (C_ACCENT, C_BG_BASE, C_BG_HOVER, C_BG_PANEL,
@@ -1238,9 +1238,12 @@ class CandleChart(QWidget):
         self._text(painter, 12, 6, W - 24, 20,
                    "链上真实报价走势 · 非交易所 K 线（无 OHLC / 成交量）",
                    C_TEXT_SUB, 11, bold=True)
+        upd = v.get("ts") or (series[-1][0] if series else 0)
+        when = (datetime.fromtimestamp(upd).strftime("%m-%d %H:%M")
+                if upd else "—")
         self._text(painter, 12, 27, W - 24, 20,
                    f"来源 {v.get('source') or '链上报价源'} · "
-                   f"{len(series)} 个真实采样点 · 本设备采集",
+                   f"{len(series)} 个真实采样点 · 更新 {when}",
                    C_TEXT_DIM, 10)
 
         try:
@@ -2603,6 +2606,10 @@ class ChartView(QWidget):
             return
         if getattr(self, "_no_kline", False):
             return
+        # 链上 DEX 源限流严格：只加载用户当前周期，不后台预取其它周期，
+        # 避免一次打开图表就打出 9 个 DEX 请求触发 429。
+        if getattr(self, "_onchain", False):
+            return
         if not bool(self._cfg.get("prefetch_enabled", True)):
             return
         try:
@@ -2668,8 +2675,13 @@ class ChartView(QWidget):
             # 换品种前先接住上一个图表的缩放与位置
             self._view_state = self.chart.view_state()
         self._symbol = symbol
-        # 链上合约品种没有交易所 K 线：不请求、不轮询，但保留价格与资料
-        self._no_kline = onchain.is_onchain(symbol)
+        # 链上品种：先尝试真实 DEX 历史 K 线（data.onchain_kline，GeckoTerminal /
+        # CoinGecko 真实 OHLCV）。取不到时才回退到「本设备真实报价采样」视图，
+        # 绝不画假蜡烛。_onchain 表示「是链上标的」，_no_kline 表示「当前正在
+        # 用采样折线兜底」，两者解耦：拿到真实 K 线后 _no_kline 会被清掉。
+        self._onchain = onchain.is_onchain(symbol)
+        self._no_kline = False
+        self._has_real_kline = False
         # 从链上页切回普通品种时恢复蜡烛绘制
         self.chart.set_onchain_view(None)
         self._onchain_code = ""
@@ -2679,7 +2691,7 @@ class ChartView(QWidget):
             self._cfg.get("show_currency", True)) if self._cfg else True
         self.lbl_symbol.setText(
             onchain.short_address(onchain.address_of(symbol))
-            if self._no_kline else symbol.split(":")[-1])
+            if self._onchain else symbol.split(":")[-1])
         self.lbl_name.setText(name or "实时行情 · K 线图表")
         self.lbl_market.setText(self._market_tag(symbol))
         self.lbl_price.setText("--")
@@ -2697,23 +2709,17 @@ class ChartView(QWidget):
         self.chart.set_history_exhausted(False)
         self._show_all = False
         self._build_interval_bar()
-        if self._no_kline:
-            # 没有交易所 K 线：切到「真实报价采样走势 + 链上结构图」分支，
-            # 不发必然失败的 K 线请求，也不画假蜡烛；价格、资料、收藏照常。
-            self.chart.set_data([])
-            self.chart.set_onchain_view({
-                "series": onchain_history.series(symbol),
-                "holders": [], "pools": [], "source": onchain.SOURCE,
-            })
-            self.chart.set_status("链上真实报价走势 · 非交易所 K 线")
-            self._refresh_timer.stop()
-            self.lbl_name.setText(name or "链上合约品种 · 真实报价走势")
-            self.lbl_market.setText("链上合约")
-            self.lbl_price.setText("--")
-            self.lbl_change.setText("—")
-            self.lbl_change.setStyleSheet(label_qss(12, C_TEXT_DIM, True, True))
+        if self._onchain:
+            # 链上标的先按真实 K 线流程加载（周期栏已在 _build_interval_bar
+            # 里按 onchain_kline.intervals() 建好）。_set_interval 会先读本地
+            # 缓存秒开，再触发 _load() 走 data.klines._fetch_onchain 拉真实
+            # DEX OHLCV；只有确认拿不到时才由 _on_failed / _on_loaded 回退到
+            # 采样折线。首屏先给出「加载中」，不预先画任何伪造数据。
+            self.lbl_name.setText(name or "链上合约品种 · 历史 K 线")
+            self.lbl_market.setText(
+                onchain.chain_of(onchain.address_of(symbol)) or "链上合约")
+            self.chart.set_status("链上历史 K 线加载中 · GeckoTerminal / CoinGecko")
             self.lbl_error.hide()
-            return
         if not intervals_for(symbol):
             self.chart.set_data([])
             self.chart.set_status("该市场暂无K线数据源，仅支持列表行情")
@@ -2761,28 +2767,42 @@ class ChartView(QWidget):
         self.update_onchain(q)
 
     def update_onchain(self, q: dict):
-        """只展示真实链上 USD 报价；没有 24h 涨跌幅就显示「—」，不编造。"""
-        if not getattr(self, "_no_kline", False):
+        """展示真实链上 USD 报价；没有 24h 涨跌幅就显示「—」，不编造。
+
+        拿到真实 K 线时只更新头部价格，不覆盖蜡烛图；处于采样兜底视图时
+        额外刷新采样折线与链上结构数据。
+        """
+        if not getattr(self, "_onchain", False):
             return
         q = q or {}
-        # 真实采样走势 + 链上结构数据（持有地址占比 / 池类型分布）
-        self.chart.set_onchain_view({
-            "series": q.get("series") or onchain_history.series(self._symbol),
-            "holders": q.get("top_holders") or [],
-            "pools": q.get("pool_types") or [],
-            "market_count": q.get("market_count"),
-            "source": q.get("source") or onchain.SOURCE,
-        })
+        if getattr(self, "_no_kline", False):
+            # 采样兜底视图：刷新真实采样走势 + 链上结构数据
+            self.chart.set_onchain_view({
+                "series": q.get("series") or onchain_history.series(self._symbol),
+                "holders": q.get("top_holders") or [],
+                "pools": q.get("pool_types") or [],
+                "market_count": q.get("market_count"),
+                "source": q.get("source") or onchain.SOURCE,
+                "ts": q.get("ts") or 0,
+            })
         p = q.get("price")
         ts = q.get("ts")
         when = (datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
                 if ts else "—")
         src = q.get("source") or "链上报价源"
         liq = q.get("liquidity")
-        tip = [f"来源：{src}", f"取数时间：{when}",
+        kline_state = onchain_kline.last_status(self._symbol)
+        if getattr(self, "_has_real_kline", False):
+            kline_line = (f"历史 K 线：真实 DEX OHLCV（{kline_state.get('source')}）"
+                          if kline_state.get("state") == "ok"
+                          else "历史 K 线：真实 DEX OHLCV（本地缓存）")
+        else:
+            kline_line = ("历史 K 线：本设备真实报价采样（"
+                          "数据源暂不可用，无 OHLC / 成交量）")
+        tip = [f"报价来源：{src}", f"取数时间：{when}",
                f"链上流动性：${liq:,.0f}" if liq is not None
                else "链上流动性：—",
-               "无交易所 K 线；图表为本设备采集的真实报价走势",
+               kline_line,
                "无 24h 涨跌幅数据（数据源不提供）"]
         if p is None or p <= 0:
             self.lbl_price.setText("--")
@@ -2914,8 +2934,8 @@ class ChartView(QWidget):
                 w.setParent(None)
                 w.deleteLater()
         self._interval_buttons.clear()
-        if getattr(self, "_no_kline", False):
-            return     # 链上币种没有 K 线周期，别造一排点了没反应的按钮
+        # 链上品种现在也有真实 DEX K 线周期（data.onchain_kline.intervals()），
+        # 正常建按钮；只有彻底无数据源的市场 intervals_for 才返回空。
         for label, key in intervals_for(self._symbol):
             btn = QPushButton(label)
             btn.setCheckable(True)
@@ -2994,7 +3014,7 @@ class ChartView(QWidget):
     # ---- 数据加载（后台线程）----
     def _load(self):
         if not self._symbol or getattr(self, "_no_kline", False):
-            return     # 链上合约品种：没有 K 线，不发无效请求
+            return     # 已回退到采样视图：不反复发注定失败的 K 线请求
         # 缓存新鲜期内完全不发 K 线请求：每次浏览都是本地秒开
         if kline_cache.is_fresh(self._symbol, self._interval):
             return
@@ -3013,6 +3033,11 @@ class ChartView(QWidget):
     def _on_loaded(self, symbol, interval, candles):
         if symbol != self._symbol or interval != self._interval:
             return
+        if getattr(self, "_onchain", False) and candles:
+            # 拿到真实 DEX OHLCV：确认退出采样兜底，恢复蜡烛绘制
+            self._has_real_kline = True
+            self._no_kline = False
+            self.chart.set_onchain_view(None)
         self.chart.interval = interval
         # API 只返回最近窗口，必须与本地已缓存的更早历史合并，
         # 不能把用户回溯出来的整段历史冲掉。
@@ -3028,8 +3053,39 @@ class ChartView(QWidget):
         else:
             self._ensure_extremes_history()
 
+    def _fallback_to_onchain_sampling(self, reason: str = ""):
+        """链上标的确认无真实 K 线时，回退到本设备真实报价采样折线。"""
+        if not getattr(self, "_onchain", False):
+            return
+        self._no_kline = True
+        self._has_real_kline = False
+        self._refresh_timer.stop()
+        self._stop_history_pump()
+        st = onchain_kline.last_status(self._symbol)
+        self.chart.set_data([])
+        self.chart.set_onchain_view({
+            "series": onchain_history.series(self._symbol),
+            "holders": [], "pools": [],
+            "source": st.get("source") or onchain.SOURCE,
+            "ts": st.get("ts") or 0,
+        })
+        self.chart.set_status("链上报价走势 · 暂无可用历史 K 线数据源")
+        self.lbl_name.setText((self.lbl_name.text() or "").split(" · ")[0]
+                              + " · 真实报价走势（无历史 K 线）")
+        self.lbl_market.setText("链上合约")
+        self.lbl_change.setText("—")
+        self.lbl_change.setStyleSheet(label_qss(12, C_TEXT_DIM, True, True))
+        tip = f"链上历史 K 线数据源不可用：{reason}" if reason else \
+            "链上历史 K 线数据源不可用"
+        self.lbl_error.setText(tip + "\n当前显示本设备采集的真实报价走势")
+        self.lbl_error.show()
+
     def _on_failed(self, symbol, interval, msg):
         if symbol != self._symbol or interval != self._interval:
+            return
+        if getattr(self, "_onchain", False):
+            # 真实 DEX K 线拿不到：回退采样折线（而非渲染空白或假数据）
+            self._fallback_to_onchain_sampling(msg)
             return
         if not self.chart.candles:
             self.chart.set_status("K线加载失败，等待自动重试...")

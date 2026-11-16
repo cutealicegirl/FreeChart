@@ -18,7 +18,7 @@ KlineWorker / HistoryWorker 并发安全。
 """
 from PySide6.QtCore import QThread, Signal
 
-from data import kline_cache
+from data import kline_cache, onchain
 from data.klines import default_interval, fetch_klines
 from data.universe import all_of
 
@@ -44,7 +44,9 @@ def build_queue(config) -> list:
     seen = set()
 
     def add(sym):
-        if sym and sym not in seen:
+        # 链上标的走按需加载：其历史来自 DEX API，限流严格且需要解析交易池，
+        # 启动时批量预拉既慢又易触发 429；用户点开图表时再拉即可。
+        if sym and sym not in seen and not onchain.is_onchain(sym):
             seen.add(sym)
             symbols.append(sym)
 

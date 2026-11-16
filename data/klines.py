@@ -17,6 +17,8 @@ from data.api_base import HTTP, MarketApiError
 from data.tencent_stock_api import is_stock_symbol
 from data import corporate_actions as _ca
 from data import price_adjustment as _pa
+from data import onchain as _onchain
+from data import onchain_kline as _ock
 
 # 加密货币周期 -> Binance interval（3d/1w/1M 为 Binance 原生周期）
 CRYPTO_INTERVALS = [
@@ -134,6 +136,8 @@ def _postprocess(symbol: str, candles: List[Candle], basis: str,
 
 def intervals_for(symbol: str) -> list:
     """返回该标的可用的周期列表 [(显示名, 周期键)]。"""
+    if _onchain.is_onchain(symbol):
+        return _ock.intervals()
     if not is_stock_symbol(symbol):
         return CRYPTO_INTERVALS
     if symbol.startswith("US:"):
@@ -144,7 +148,9 @@ def intervals_for(symbol: str) -> list:
 
 
 def default_interval(symbol: str) -> str:
-    """默认周期：加密货币 15 分，股票日 K。"""
+    """默认周期：链上 DEX 1 时，加密货币 15 分，股票日 K。"""
+    if _onchain.is_onchain(symbol):
+        return _ock.default_interval()
     return "15m" if not is_stock_symbol(symbol) else "day"
 
 
@@ -209,7 +215,10 @@ def fetch_klines(symbol: str, interval: str) -> List[Candle]:
       - 腾讯 A股/HK 日线 qfq：价格已前复权，只补成交量；
       - 新浪美股 / 腾讯分钟线：原始价，按已核实事件做经验门控前复权；
       - 加密：数据源自行处理迁移，登记库只标记不重复复权。
+      - 链上 DEX：真实 OHLCV 由 GeckoTerminal/CoinGecko 提供，不做股票复权。
     """
+    if _onchain.is_onchain(symbol):
+        return _fetch_onchain(symbol, interval)
     if symbol.startswith("US:"):
         return _fetch_us(symbol, interval)
     if symbol.startswith("HK:"):
@@ -217,6 +226,26 @@ def fetch_klines(symbol: str, interval: str) -> List[Candle]:
     if is_stock_symbol(symbol):
         return _fetch_stock(symbol, interval)
     return _fetch_crypto(symbol, interval)
+
+
+# ================= 链上标的（真实 DEX OHLCV） =================
+def _fetch_onchain_raw_safe(symbol: str, interval: str,
+                            allow_empty: bool) -> List[Candle]:
+    """兜底：即便误入 _fetch_crypto_raw 也走真实 DEX 源，不拼币安交易对。"""
+    try:
+        return _fetch_onchain(symbol, interval)
+    except MarketApiError:
+        if allow_empty:
+            return []
+        raise
+
+
+def _fetch_onchain(symbol: str, interval: str) -> List[Candle]:
+    """链上合约真实历史 K 线；底层适配多源，失败抛 MarketApiError。"""
+    bars = _ock.fetch_ohlcv(symbol, interval, _LIMIT, allow_empty=False)
+    return [Candle(ts=b.ts, time_label=b.time_label, open=b.open,
+                   high=b.high, low=b.low, close=b.close,
+                   volume=b.volume) for b in bars]
 
 
 # ================= 加密货币（Binance） =================
@@ -252,6 +281,11 @@ def _fetch_crypto_raw(symbol: str, interval: str, limit: int,
                       allow_empty: bool = False) -> List[Candle]:
     """allow_empty=True 用于回溯到上市首根时优雅收尾（不再抛异常）。"""
     import json as _json
+
+    # 防御：链上标的绝不拼成 ONCHAIN:xxxUSDT 发给 Binance（必然 400）。
+    # 正常路径已在 fetch_klines 分派到 _fetch_onchain；这里是最后一道闸。
+    if _onchain.is_onchain(symbol):
+        return _fetch_onchain_raw_safe(symbol, interval, allow_empty)
 
     params = {
         "symbol": f"{symbol}USDT",
@@ -515,6 +549,14 @@ def fetch_klines_before(symbol: str, interval: str, before_ts: float,
     """
     if before_ts <= 0:
         return [], True
+    if _onchain.is_onchain(symbol):
+        bars = _ock.fetch_ohlcv(symbol, interval, limit,
+                                before_ts=before_ts, allow_empty=True)
+        candles = [Candle(ts=b.ts, time_label=b.time_label, open=b.open,
+                          high=b.high, low=b.low, close=b.close,
+                          volume=b.volume) for b in bars
+                   if b.ts < before_ts]
+        return candles, not candles
     if symbol.startswith("US:"):
         return [], True     # 新浪美股日线一次已返回全部历史
     if symbol.startswith("HK:"):

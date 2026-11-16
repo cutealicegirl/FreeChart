@@ -87,5 +87,23 @@ ok("Android 美股分钟 typeMap 覆盖全部分钟周期",
 ok("Android 年K 用 1M 聚合（不透传 1y）",
    "interval === '1y'" in js and "'&interval=1M&limit=1000'" in js)
 
+# 8) 链上 DEX K 线周期集合：桌面 onchain_kline.ONCHAIN_INTERVALS ==
+#    Android OC_INTERVALS（v1.4 新增真实历史 K 线，双端必须一致）
+from data import onchain_kline as _ock  # noqa: E402
+py_oc = [k for _, k in _ock.ONCHAIN_INTERVALS]
+js_oc = js_intervals("OC_INTERVALS")
+ok("链上 DEX 周期集合双端一致", py_oc == js_oc,
+   f"\n  Windows={py_oc}\n  Android={js_oc}")
+
+# 9) 链上周期 → DEX timeframe 映射双端一致（GeckoTerminal aggregate）
+py_tf = _ock._GT_TF
+js_tf_block = re.search(r"var\s+OC_TF\s*=\s*\{(.*?)\};", js, re.S)
+assert js_tf_block, "未找到 Android OC_TF"
+js_tf_keys = re.findall(r"'([^']+)'\s*:\s*\['(\w+)',\s*(\d+)\]", js_tf_block.group(1))
+js_tf = {k: (tf, int(agg)) for k, tf, agg in js_tf_keys}
+ok("链上 DEX timeframe 映射双端一致",
+   all(js_tf.get(k) == tuple(v) for k, v in py_tf.items()),
+   f"\n  Windows={py_tf}\n  Android={js_tf}")
+
 print(f"\n=== 结果: {PASS} 通过 / {FAIL} 失败 ===")
 sys.exit(1 if FAIL else 0)

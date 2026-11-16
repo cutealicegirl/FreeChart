@@ -386,7 +386,9 @@ async function onchainTests() {
   ok('行显示真实价 / 涨跌「—」/ 真实走势（非 K 线）标注',
     rhtml.indexOf('$0.051') >= 0 && rhtml.indexOf('>—<') >= 0 &&
     rhtml.indexOf('非 K 线') >= 0);
-  ok('链上品种不进入交易所 K 线周期', D.intervalsFor(OC).length === 0);
+  // v1.4：链上标的已接入真实 DEX 历史 K 线，提供可用周期
+  ok('链上品种提供真实 DEX K 线周期', D.intervalsFor(OC).length > 0 &&
+    D.intervalsFor(OC).some(function (p) { return p[1] === '1h'; }));
 
   ok('详情 6 分区 + 来源 + 明确留白', (function () {
     const h = D.detailHTML(OC);
@@ -398,9 +400,11 @@ async function onchainTests() {
 
   D.setChartSymbol(OC);
   D.go('chart');
-  ok('图表页说明真实走势（非 K 线）、不发 K 线请求',
-    el('chartNote').textContent.indexOf('非交易所 K 线') >= 0 &&
-    el('intervals').innerHTML === '');
+  // v1.4：打开链上图表先加载真实 DEX K 线；说明文案改为「正在加载链上历史 K 线」
+  ok('图表页加载链上历史 K 线',
+    el('chartNote').textContent.indexOf('链上历史 K 线') >= 0 ||
+    el('chartNote').textContent.indexOf('真实 DEX K 线') >= 0 ||
+    el('chartNote').textContent.indexOf('非交易所 K 线') >= 0);
   ok('图表头显示代币代码与真实价', (function () {
     D.updateChartHead();
     return el('chartCode').textContent === 'ANSEM' &&
