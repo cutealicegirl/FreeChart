@@ -20,7 +20,24 @@ from data.klines import Candle
 
 _DB_NAME = "klines.sqlite3"
 _FRESH_SECONDS = 900          # 15 分钟内直接读本地，不发 K 线请求
+# 缓存结构版本：v1 = 复权改造之前（价格/成交量口径不一致）。
+#  bump 到 v2 让所有旧缓存自动失效并重新按复权口径抓取，避免"已复权数据"
+#  与"旧未复权缓存"混用。以后每当复权算法语义变化都应 +1。
+_CACHE_SCHEMA = "v2-adjusted"
 _local = threading.local()
+
+
+def _adjust_tag(symbol: str) -> str:
+    """该标的的公司行为指纹；登记库变化时缓存自动失效。
+
+    放在缓存层内部计算，调用方无需改动。异常时返回空串（退化为不校验指纹
+    但 schema 仍生效），保证复权增强层永不让缓存不可用。
+    """
+    try:
+        from data import corporate_actions as _ca
+        return _ca.get_registry().fingerprint(symbol)
+    except Exception:
+        return ""
 
 
 def db_path() -> str:
@@ -51,6 +68,13 @@ def _conn() -> sqlite3.Connection:
             symbol TEXT NOT NULL, interval TEXT NOT NULL,
             exhausted INTEGER DEFAULT 0, updated REAL DEFAULT 0,
             PRIMARY KEY (symbol, interval))""")
+    # 兼容旧库：新增列但保留原有行；schema 为空会被判定为过期并重新抓取。
+    for col, decl in (("schema", "TEXT DEFAULT ''"),
+                      ("adj_tag", "TEXT DEFAULT ''")):
+        try:
+            conn.execute(f"ALTER TABLE meta ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
     conn.commit()
     _local.conn = conn
     return conn
@@ -58,14 +82,22 @@ def _conn() -> sqlite3.Connection:
 
 def _meta(symbol: str, interval: str):
     row = _conn().execute(
-        "SELECT exhausted, updated FROM meta WHERE symbol=? AND interval=?",
-        (symbol, interval)).fetchone()
-    return (bool(row[0]), float(row[1])) if row else (False, 0.0)
+        "SELECT exhausted, updated, schema, adj_tag FROM meta "
+        "WHERE symbol=? AND interval=?", (symbol, interval)).fetchone()
+    if not row:
+        return (False, 0.0, "", "")
+    return (bool(row[0]), float(row[1]),
+            row[2] if row[2] is not None else "",
+            row[3] if row[3] is not None else "")
 
 
 def is_fresh(symbol: str, interval: str, ttl: int = _FRESH_SECONDS) -> bool:
-    """缓存是否存在且仍在新鲜期内。"""
-    _ex, updated = _meta(symbol, interval)
+    """缓存是否存在、仍在新鲜期、且口径与当前复权版本/事件指纹一致。"""
+    _ex, updated, schema, adj_tag = _meta(symbol, interval)
+    if schema != _CACHE_SCHEMA:       # 旧版缓存（未复权）：强制失效
+        return False
+    if adj_tag != _adjust_tag(symbol):  # 公司行为登记库已变化：强制失效
+        return False
     if updated <= 0 or (time.time() - updated) > ttl:
         return False
     return count(symbol, interval) > 0
@@ -107,6 +139,7 @@ def save(symbol: str, interval: str, candles: list,
          exhausted: bool | None = None):
     """写入/更新 K 线；exhausted=None 表示不改动到头标记。"""
     conn = _conn()
+    tag = _adjust_tag(symbol)
     if candles:
         conn.executemany(
             "INSERT OR REPLACE INTO candles "
@@ -116,16 +149,19 @@ def save(symbol: str, interval: str, candles: list,
               c.volume, c.time_label) for c in candles])
     if exhausted is None:
         conn.execute(
-            "INSERT INTO meta(symbol,interval,exhausted,updated) "
-            "VALUES (?,?,0,?) ON CONFLICT(symbol,interval) "
-            "DO UPDATE SET updated=excluded.updated",
-            (symbol, interval, time.time()))
+            "INSERT INTO meta(symbol,interval,exhausted,updated,schema,adj_tag) "
+            "VALUES (?,?,0,?,?,?) ON CONFLICT(symbol,interval) "
+            "DO UPDATE SET updated=excluded.updated, schema=excluded.schema, "
+            "adj_tag=excluded.adj_tag",
+            (symbol, interval, time.time(), _CACHE_SCHEMA, tag))
     else:
         conn.execute(
-            "INSERT INTO meta(symbol,interval,exhausted,updated) "
-            "VALUES (?,?,?,?) ON CONFLICT(symbol,interval) DO UPDATE SET "
-            "exhausted=excluded.exhausted, updated=excluded.updated",
-            (symbol, interval, int(bool(exhausted)), time.time()))
+            "INSERT INTO meta(symbol,interval,exhausted,updated,schema,adj_tag) "
+            "VALUES (?,?,?,?,?,?) ON CONFLICT(symbol,interval) DO UPDATE SET "
+            "exhausted=excluded.exhausted, updated=excluded.updated, "
+            "schema=excluded.schema, adj_tag=excluded.adj_tag",
+            (symbol, interval, int(bool(exhausted)), time.time(),
+             _CACHE_SCHEMA, tag))
     conn.commit()
 
 

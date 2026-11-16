@@ -15,6 +15,8 @@ from PySide6.QtCore import QThread, Signal
 
 from data.api_base import HTTP, MarketApiError
 from data.tencent_stock_api import is_stock_symbol
+from data import corporate_actions as _ca
+from data import price_adjustment as _pa
 
 # 加密货币周期 -> Binance interval（3d/1w/1M 为 Binance 原生周期）
 CRYPTO_INTERVALS = [
@@ -41,8 +43,8 @@ HK_INTERVALS = [
 STOCK_AGG = {
     "3day": "3day", "week": "week", "month": "month", "1year": "year",
 }
-_US_SINA_TYPE = {"1m": "1", "m5": "5", "m15": "15",
-                 "m30": "30", "m60": "60", "day": "240"}
+_US_SINA_TYPE = {"m1": "1", "m5": "5", "m15": "15",
+                 "m30": "30", "m60": "60", "day": "240", "1m": "1"}
 
 _BINANCE_KLINE_URL = "https://data-api.binance.vision/api/v3/klines"
 _TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
@@ -67,6 +69,58 @@ class Candle:
     low: float
     close: float
     volume: float
+
+
+# ============ 公司行为复权集成 ============
+# 记录最近一次复权/异常探测结果，供界面可选提示；不影响主流程。
+_ADJUST_REPORT: Dict[str, dict] = {}
+
+
+def adjustment_report(symbol: str) -> dict:
+    """返回该标的最近一次的公司行为处理报告（只读）。"""
+    return dict(_ADJUST_REPORT.get(symbol, {}))
+
+
+def _postprocess(symbol: str, candles: List[Candle], basis: str,
+                 price_already_adjusted: bool = False) -> List[Candle]:
+    """统一后处理：按登记库对公司行为做复权 + 记录异常标记。
+
+    basis: "raw" 数据源未复权 | "source_qfq" 数据源已前复权价格。
+    price_already_adjusted=True 时只补成交量（腾讯 qfq 场景）。
+    """
+    if not candles:
+        return candles
+    try:
+        reg = _ca.get_registry()
+        actions = reg.actions_for(symbol)
+        if not actions:
+            return candles
+        applied: list = []
+        if price_already_adjusted:
+            # 价格已由数据源前复权：成交量按已核实份额事件补齐。
+            # 该场景无法用价格跳空做门控，直接采用 verified 事件。
+            applied = [a for a in actions if a.usable and not a.source_rebased
+                       and a.volume_factor != 1.0]
+            out = _pa.adjust_volume_only(candles, actions)
+        else:
+            # 原始价：经验门控，只有确认"未复权"的事件才真正应用。
+            effective = _pa.detect_unadjusted_events(candles, actions)
+            applied = effective
+            out = _pa.apply_adjustment(candles, effective,
+                                       basis="raw", mode="forward") if effective else candles
+        anomalies = _pa.detect_anomalies(out, actions)
+        _ADJUST_REPORT[symbol] = {
+            "symbol": symbol,
+            "events": [a.to_dict() for a in actions],
+            "applied": [a.to_dict() for a in applied],
+            "anomalies": anomalies,
+            "fingerprint": _pa.adjustment_fingerprint(actions),
+            "basis": basis,
+        }
+        return out
+    except Exception:
+        # 复权是增强层：任何意外都不能让 K 线加载失败
+        return candles
 
 
 def intervals_for(symbol: str) -> list:
@@ -140,7 +194,13 @@ def _aggregate(candles: List[Candle], mode: str) -> List[Candle]:
 
 
 def fetch_klines(symbol: str, interval: str) -> List[Candle]:
-    """拉取 K 线（同步，后台线程调用）。失败抛 MarketApiError。"""
+    """拉取 K 线（同步，后台线程调用）。失败抛 MarketApiError。
+
+    公司行为复权在各底层抓取函数内完成（因为只有那里知道数据源口径）：
+      - 腾讯 A股/HK 日线 qfq：价格已前复权，只补成交量；
+      - 新浪美股 / 腾讯分钟线：原始价，按已核实事件做经验门控前复权；
+      - 加密：数据源自行处理迁移，登记库只标记不重复复权。
+    """
     if symbol.startswith("US:"):
         return _fetch_us(symbol, interval)
     if symbol.startswith("HK:"):
@@ -235,10 +295,10 @@ def _fetch_us(symbol: str, interval: str) -> List[Candle]:
     """
     code = symbol[3:].lower()            # US:AAPL -> aapl
     if interval in STOCK_AGG:
-        daily = _fetch_us_daily(code)
+        daily = _postprocess(symbol, _fetch_us_daily(code), "raw")
         return _aggregate(daily, STOCK_AGG[interval])
     if interval == "day":
-        return _fetch_us_daily(code)
+        return _postprocess(symbol, _fetch_us_daily(code), "raw")
     sina_type = _US_SINA_TYPE.get(interval, "5")
     try:
         resp = HTTP.get(_SINA_US_URL,
@@ -266,7 +326,7 @@ def _fetch_us(symbol: str, interval: str) -> List[Candle]:
             continue
     if not candles:
         raise MarketApiError("新浪美股K线返回为空")
-    return candles
+    return _postprocess(symbol, candles, "raw")
 
 
 def _fetch_us_daily(code: str) -> List[Candle]:
@@ -303,7 +363,7 @@ def _fetch_us_daily(code: str) -> List[Candle]:
 def _fetch_stock(symbol: str, interval: str) -> List[Candle]:
     if symbol.startswith("HK:"):
         raise MarketApiError("港股暂无公开K线数据源")
-    # 周/月/3日/年 K：由日线本地聚合（统一走同一解析路径，稳定可靠）
+    # 周/月/3日/年 K：由（已复权的）日线本地聚合，口径与日线一致
     if interval in STOCK_AGG:
         daily = _fetch_stock(symbol, "day")
         return _aggregate(daily, STOCK_AGG[interval])
@@ -320,7 +380,11 @@ def _fetch_stock(symbol: str, interval: str) -> List[Candle]:
     candles = _parse_stock_rows(rows, interval)
     if not candles:
         raise MarketApiError("腾讯K线返回为空")
-    return candles
+    # 腾讯日线 qfq 已前复权价格，但成交量仍是原始份额 -> 只补成交量；
+    # 分钟线未复权 -> 走经验门控的完整复权。
+    if interval == "day":
+        return _postprocess(symbol, candles, "source_qfq", price_already_adjusted=True)
+    return _postprocess(symbol, candles, "raw")
 
 
 def _tencent_rows(param: str, code: str, interval: str,
@@ -381,6 +445,8 @@ def _fetch_hk(symbol: str, interval: str) -> List[Candle]:
     daily = _hk_daily_rows(code)
     if not daily:
         raise MarketApiError("港股K线返回为空")
+    # hkfqkline qfq 已前复权价格，只补成交量
+    daily = _postprocess(symbol, daily, "source_qfq", price_already_adjusted=True)
     if interval in STOCK_AGG:
         return _aggregate(daily, STOCK_AGG[interval])
     return daily
@@ -393,6 +459,7 @@ def _fetch_hk_before(symbol: str, interval: str,
     daily = _hk_daily_rows(code, end_date)
     if not daily:
         return []
+    daily = _postprocess(symbol, daily, "source_qfq", price_already_adjusted=True)
     if interval in STOCK_AGG:
         agg = _aggregate(daily, STOCK_AGG[interval])
         if agg:
@@ -418,6 +485,7 @@ def _fetch_stock_before(symbol: str, interval: str,
     daily = _parse_stock_rows(rows, "day")
     if not daily:
         return []
+    daily = _postprocess(symbol, daily, "source_qfq", price_already_adjusted=True)
     if interval in STOCK_AGG:
         agg = _aggregate(daily, STOCK_AGG[interval])
         # 页尾那一桶很可能只含半个周期，留到下一页凑齐再生成

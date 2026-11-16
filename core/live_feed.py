@@ -15,6 +15,8 @@ import time
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
+from core.thread_cleanup import safe_stop_thread
+
 
 class _QuoteWorker(QThread):
     done = Signal(str, float, float)     # symbol, price, change_pct
@@ -25,9 +27,16 @@ class _QuoteWorker(QThread):
         self._symbol = symbol
 
     def run(self):
+        # 退出期间若已请求中断，直接收尾，不再发起新的网络调用。
+        if self.isInterruptionRequested():
+            return
         try:
             price, change = self._manager.fetch_quote(self._symbol)
         except Exception:
+            return
+        # 网络调用不可中断（requests 阻塞），返回后再检查一次：中断期间
+        # 拿到的结果不再发信号，避免退出过程触碰上层 UI。
+        if self.isInterruptionRequested():
             return
         if price and price > 0:
             self.done.emit(self._symbol, float(price), float(change or 0.0))
@@ -83,20 +92,21 @@ class LiveFeed(QObject):
         self._timer.stop()
 
     def shutdown(self):
+        """停止定时器并安全收尾在途请求线程。
+
+        旧实现先清空 _worker 再 wait，且丢弃 wait 结果：若网络请求超时
+        未结束（fetch_quote 单次最长约 16s，而只等 1.2s），线程引用被
+        提前丢弃，退出时 QThread 仍在运行，Qt 会 fail-fast 崩溃。
+        现改为「中断 -> 等待 -> 复查 -> 保活」的统一范式。
+        """
         self.stop()
         worker = self._worker
         self._worker = None
         self._busy = False
         if worker is None:
             return
-        try:
-            worker.done.disconnect(self._on_done)
-        except (RuntimeError, TypeError):
-            pass
-        try:
-            worker.wait(1200)
-        except RuntimeError:
-            pass
+        safe_stop_thread(worker, wait_ms=1500,
+                         signals=(worker.done, worker.finished))
 
     # ---- 内部 ----
     def _fire(self):

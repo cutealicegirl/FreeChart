@@ -81,10 +81,19 @@ class PrefetchWorker(QThread):
     def queue_size(self) -> int:
         return len(self._queue)
 
-    def stop(self):
-        """请求中断并等待线程收尾（网络请求可能正在超时，给足等待时间）。"""
+    def stop(self) -> bool:
+        """请求中断并等待线程收尾（网络请求可能正在超时，给足等待时间）。
+
+        返回 True 表示线程已干净结束；False 表示 wait 超时后仍在运行，
+        调用方必须保留引用 / 保活，禁止直接丢弃（否则父对象析构时
+        Qt 会销毁一个仍在运行的 QThread 而 fail-fast）。
+        """
         self.requestInterruption()
-        self.wait(10000)
+        try:
+            self.wait(10000)
+            return not self.isRunning()
+        except RuntimeError:
+            return True
 
     def run(self):
         # 启动延迟按秒分段睡，退出时能立刻响应中断
@@ -102,6 +111,9 @@ class PrefetchWorker(QThread):
                 if kline_cache.is_fresh(symbol, interval, ttl=self._ttl):
                     continue                       # 本地已有，零请求
                 candles = fetch_klines(symbol, interval)
+                # 网络调用不可中断：返回后检查中断标志，退出期间不再emit/write
+                if self.isInterruptionRequested():
+                    break
                 if candles:
                     # 与浏览时已回溯出的更早历史合并保存，不覆盖
                     kline_cache.save(symbol, interval, candles)

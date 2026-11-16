@@ -91,11 +91,16 @@
   var RUGCHECK = 'https://api.rugcheck.xyz/v1/tokens/';
 
   var CRYPTO_INTERVALS = [['1分', '1m'], ['5分', '5m'], ['15分', '15m'],
-                          ['1时', '1h'], ['4时', '4h'], ['日K', '1d'],
-                          ['周K', '1w'], ['月K', '1M']];
+                          ['30分', '30m'], ['1时', '1h'], ['4时', '4h'],
+                          ['日K', '1d'], ['3日', '3d'], ['周K', '1w'],
+                          ['月K', '1M'], ['年K', '1y']];
   var STOCK_INTERVALS = [['日K', 'day'], ['3日', '3day'],
                          ['周K', 'week'], ['月K', 'month'], ['年K', '1year']];
-  var CN_MINUTES = [['5分', 'm5'], ['15分', 'm15'], ['30分', 'm30'], ['60分', 'm60']];
+  var CN_MINUTES = [['1分', 'm1'], ['5分', 'm5'], ['15分', 'm15'],
+                    ['30分', 'm30'], ['1时', 'm60']];
+  // 美股分钟线：新浪 type=1/5/15/30/60 分，与桌面 US_INTERVALS 完全对齐。
+  var US_MINUTES = [['1分', 'm1'], ['5分', 'm5'], ['15分', 'm15'],
+                    ['30分', 'm30'], ['1时', 'm60']];
 
   // ===================== 小工具 =====================
   // ===================== 链上合约品种工具 =====================
@@ -239,6 +244,18 @@
     'show_vol', 'page_size', 'retry_limit', 'live_feed', 'live_interval_ms',
     'chart_font_scale', 'show_currency', 'show_icons', 'cache_keep_days'];
 
+  // 桌面端 config.json 用 onchain_symbols 存链上品种元数据，Android 内部用 onchain。
+  // 跨端导入时做别名归一化，否则链上收藏的代币代码/名称会静默丢失。
+  // 只在新键缺失时回填，保留两端各自原生键，重复导入幂等。
+  function normalizeImportedConfig(obj) {
+    if (!obj || typeof obj !== 'object') return obj;
+    if (obj.onchain_symbols !== undefined && obj.onchain_symbols !== null &&
+        (obj.onchain === undefined || obj.onchain === null)) {
+      obj.onchain = obj.onchain_symbols;
+    }
+    return obj;
+  }
+
   var CFG = (function () {
     var c = {}, k;
     for (k in DEFAULTS) {
@@ -248,7 +265,7 @@
             : DEFAULTS[k]);
       }
     }
-    var saved = readJSON('ct_config', null);
+    var saved = normalizeImportedConfig(readJSON('ct_config', null));
     if (saved && typeof saved === 'object') {
       for (var j = 0; j < IMPORT_KEYS.length; j++) {
         var key = IMPORT_KEYS[j];
@@ -673,6 +690,9 @@
     if (!syms || !syms.length || _ocBusy) return Promise.resolve(0);
     if (!force && Date.now() - _ocLast < 60000) return Promise.resolve(0);
     _ocBusy = true; _ocLast = Date.now();
+    // 记录发起时的图表请求序号：回调里据此判断图表是否需要跟着重绘，
+    // 防止切到别的链上品种后，旧请求回来重绘当前图表（数据写入照常）。
+    var chartSeqAtStart = chartLoadSeq;
     var jobs = syms.map(function (s) {
       var a = ocAddr(s);
       if (!isSolanaAddr(a)) return Promise.resolve([s, null]);
@@ -697,8 +717,10 @@
         store.set('ct_tickers_asof', TICKER_ASOF);
         SOURCE_TEXT = OC_SOURCE;
         saveCfg();
-        renderList();
-        if (PAGE === 'chart') {
+        scheduleRender();            // 合帧：链上报价高频刷新不与主刷新重复重建列表
+        // 仅当这次报价请求仍是当前图表请求时才重绘图表；
+        // 否则数据已入 ONCHAIN_Q，待当前品种自己的请求回来再画。
+        if (PAGE === 'chart' && chartSeqAtStart === chartLoadSeq) {
           updateChartHead();
           if (isOnchain(CHART_SYMBOL)) drawChart();   // 新采样点立即进走势图
         }
@@ -946,6 +968,9 @@
   var CHART_SYMBOL = CFG.last_symbol || '';
   var CANDLES = [];
   var CHART_INTERVAL = '';
+  // K 线异步请求序号：每次切换品种 / 周期递增，旧请求的回调一律作废，
+  // 防止「AAPL 请求晚于 TSLA 返回」把当前图表覆盖成旧品种/旧周期数据。
+  var chartLoadSeq = 0;
   var VIEW = { count: Number(CFG.chart_view_count) || 90,
                pan: Number(CFG.chart_view_pan) || 0 };
   var openSheetId = '';
@@ -1070,8 +1095,37 @@
     _renderQueued = true;
     (window.requestAnimationFrame || function (f) { setTimeout(f, 16); })(function () {
       _renderQueued = false;
-      renderList();
+      // 合帧渲染只由行情数据刷新触发，市场/子页状态未变，无需重建标签按钮
+      renderList({ skipTabs: true });
     });
+  }
+
+  // 行级增量渲染缓存：可见行的顺序签名 + 每行 HTML。
+  // 数据刷新时若行集合与顺序不变，只就地替换内容真正变化的行，
+  // 避免整表 innerHTML 重建（同时保留图标 <img> 节点，防止重复加载与滚动抖动）。
+  // 当运行环境 DOM 能力不足（如测试桩）或结构变化时自动回退到全量重建。
+  var _lastRenderSig = null;
+  var _lastRowHTML = [];
+  function rowsSignature(rows) { return rows.join('\u0001'); }
+  function patchRowsFromHTML(list, htmls) {
+    if (!list.querySelectorAll || !document.createElement) return false;
+    var nodes = list.querySelectorAll('.trow');
+    if (!nodes || nodes.length !== htmls.length) return false;
+    for (var i = 0; i < htmls.length; i++) {
+      if (htmls[i] === _lastRowHTML[i]) continue;
+      var holder = document.createElement('div');
+      holder.innerHTML = htmls[i];
+      var fresh = holder.firstElementChild || holder.firstChild;
+      if (!fresh || !fresh.querySelector) return false;
+      var old = nodes[i];
+      var oldInfo = old.querySelector('.info'), newInfo = fresh.querySelector('.info');
+      var oldRight = old.querySelector('.right'), newRight = fresh.querySelector('.right');
+      if (!oldInfo || !newInfo || !oldRight || !newRight) return false;
+      old.className = fresh.className;            // 置顶高亮
+      oldInfo.innerHTML = newInfo.innerHTML;      // 名字 / 置顶标记 / 市值 / 换手
+      oldRight.innerHTML = newRight.innerHTML;    // 价格 / 涨跌 / 缓存标记
+    }
+    return true;
   }
   function chgClass(v) { return v === null ? 'flat' : (v > 0 ? 'up' : (v < 0 ? 'down' : 'flat')); }
   function chgText(v) {
@@ -1155,14 +1209,14 @@
       '<button class="add" data-addcontract="' + esc(q) + '" aria-label="加入自选">' +
       (added ? '✓ 已收藏 · 重新解析' : '＋ 解析并加入自选') + '</button></div>';
   }
-  function renderList() {
+  function renderList(opts) {
+    opts = opts || {};
     computeOrder();
-    // 合约搜索结果已迁到独立搜索页，行情列表只做筛选，不与结果同层
-    var hit = '';
     var n = Math.min(LOADED, ORDER.length);
-    var html = hit;
-    for (var i = 0; i < n; i++) html += rowHTML(ORDER[i]);
-    if (!ORDER.length && !hit) {
+    var visible = ORDER.slice(0, n);
+    // 空态：保持原有引导卡片 / 提示，整块写入
+    if (!ORDER.length) {
+      var html = '';
       if (CFG.sub_tabs[MARKET] === 'watch' && !SEARCH_TEXT.trim()) {
         html = '<div class="empty"><b>「' + MARKET_NAME[MARKET] +
           '」自选还是空的</b><br><span class="dim">到「全部」里长按品种 → ＋ 加入自选</span>' +
@@ -1170,8 +1224,23 @@
       } else {
         html = '<div class="empty">没有匹配的品种<br>试试切换「全部」或修改搜索关键词</div>';
       }
+      $('list').innerHTML = html;
+      _lastRenderSig = null; _lastRowHTML = [];
+    } else {
+      var sig = rowsSignature(visible);
+      var htmls = [];
+      for (var i = 0; i < visible.length; i++) htmls.push(rowHTML(visible[i]));
+      // 行集合/顺序不变：尝试行级增量替换（仅动价格/涨跌/市值文本）
+      if (sig === _lastRenderSig && patchRowsFromHTML($('list'), htmls)) {
+        _lastRowHTML = htmls;
+      } else {
+        // 结构变化或环境不支持增量：整表重建（保持原有行为）
+        var full = '';
+        for (var j = 0; j < htmls.length; j++) full += htmls[j];
+        $('list').innerHTML = full;
+        _lastRenderSig = sig; _lastRowHTML = htmls;
+      }
     }
-    $('list').innerHTML = html;
     $('loadMore').hidden = n >= ORDER.length;
     $('loadMore').textContent = n >= ORDER.length ? '' :
       '加载更多（已显示 ' + n + ' / ' + ORDER.length + '）';
@@ -1179,7 +1248,8 @@
     $('sectionTitle').textContent =
       (CFG.sub_tabs[MARKET] === 'all' ? '全部行情' : '自选行情') + ' · ' + MARKET_NAME[MARKET];
     $('sortLabel').textContent = SORT_SHORT[CFG.sort_mode] || CFG.sort_mode;
-    renderTabs();
+    // 标签按钮只在市场/子页真正变化时重建；数据刷新（skipTabs）跳过
+    if (!opts.skipTabs) renderTabs();
   }
   function renderTabs() {
     var mh = '', sh = '', i;
@@ -1199,7 +1269,7 @@
   function loadMore() {
     if (LOADED >= ORDER.length) return;
     LOADED = Math.min(LOADED + PAGE_SIZE, ORDER.length);
-    renderList();
+    scheduleRender();                // 合帧：与紧随的刷新请求合并渲染，避免双次重建
     requestWindow();                 // 只补请求新增窗口，不重刷已显示行
   }
 
@@ -1211,10 +1281,23 @@
     $('statusText').textContent = text;
     $('btnRetry').hidden = !canRetry;
   }
+  // 时间戳单调性保护：并发请求乱序返回时，旧快照不得覆盖更新的快照。
+  // 只有新旧双方 ts 都是有效数字、且 incoming.ts 严格更旧时才拒绝写入；
+  // 缺少 ts 的历史数据维持原行为（照常写入），保证兼容性。
+  function _quoteIsStale(sym, incoming) {
+    var old = TICKERS[sym];
+    if (!old) return false;
+    var it = incoming && Number(incoming.ts), ot = Number(old.ts);
+    if (!isFinite(it) || !isFinite(ot) || it <= 0 || ot <= 0) return false;
+    return it < ot;
+  }
   function applyTickers(map, sources) {
     var n = 0;
     for (var s in map) {
-      if (Object.prototype.hasOwnProperty.call(map, s)) { TICKERS[s] = map[s]; n++; }
+      if (Object.prototype.hasOwnProperty.call(map, s)) {
+        if (_quoteIsStale(s, map[s])) continue;   // 拒绝过期快照覆盖新快照
+        TICKERS[s] = map[s]; n++;
+      }
     }
     BATCH = {};
     for (var b in map) { if (Object.prototype.hasOwnProperty.call(map, b)) BATCH[b] = 1; }
@@ -1257,7 +1340,7 @@
       if (n) {
         _fails = 0;
         setStatus('● 已更新 · ' + SOURCE_TEXT + ' · ' + fmtTime(TICKER_ASOF), false);
-        renderList();
+        scheduleRender();            // 合帧：与主刷新/链上刷新合并为一次列表渲染
       } else {
         onFail('行情接口未返回数据');
       }
@@ -1815,7 +1898,10 @@
       // 否则列表里其它行会被误标成「缓存价」。
       if (Object.keys(map).length) {
         for (var s2 in map) {
-          if (Object.prototype.hasOwnProperty.call(map, s2)) TICKERS[s2] = map[s2];
+          if (Object.prototype.hasOwnProperty.call(map, s2)) {
+            if (_quoteIsStale(s2, map[s2])) continue;   // 同样防乱序旧快照
+            TICKERS[s2] = map[s2];
+          }
         }
         TICKER_ASOF = nowSec();
         writeJSON('ct_tickers', TICKERS);
@@ -1837,7 +1923,8 @@
     var mk = marketOf(sym);
     if (mk === 'crypto') return CRYPTO_INTERVALS;
     if (mk === 'cn') return CN_MINUTES.concat(STOCK_INTERVALS);
-    return STOCK_INTERVALS;
+    if (mk === 'us') return US_MINUTES.concat(STOCK_INTERVALS);
+    return STOCK_INTERVALS;                  // 港股：仅日线及以上（腾讯 hkfqkline 无分钟线）
   }
   function defaultInterval(sym) { return marketOf(sym) === 'crypto' ? '15m' : 'day'; }
   function labelFor(ts, interval) {
@@ -1882,6 +1969,83 @@
     }
     return out;
   }
+
+  // ===================== 公司行为复权（与桌面端 data/corporate_actions.py + price_adjustment.py 同口径） =====================
+  // 已核实公司行为登记库（ratio=除权后每1旧份额换到的新份额数；价格因子=1/ratio）。
+  // 与 data/corporate_actions.json 保持一致；只处理 verified 且比例确定的事件。
+  var CORPORATE_ACTIONS = {
+    'US:AAPL': [
+      { d: '2000-06-21', r: 2, k: 'split' }, { d: '2005-02-28', r: 2, k: 'split' },
+      { d: '2014-06-09', r: 7, k: 'split' }, { d: '2020-08-31', r: 4, k: 'split' }
+    ],
+    'US:TSLA': [
+      { d: '2020-08-31', r: 5, k: 'split' }, { d: '2022-08-25', r: 3, k: 'split' }
+    ],
+    'US:NVDA': [
+      { d: '2021-07-20', r: 4, k: 'split' }, { d: '2024-06-10', r: 10, k: 'split' }
+    ],
+    'US:AMZN': [{ d: '2022-06-06', r: 20, k: 'split' }],
+    'US:GOOGL': [{ d: '2022-07-18', r: 20, k: 'split' }],
+    'US:MSFT': [{ d: '2003-02-18', r: 2, k: 'split' }]
+  };
+  // 数据源是否自带前复权：腾讯 A股/HK 日线 qfq 已复权价格，美股新浪为原始价。
+  var SHARE_CHANGE_KINDS = { split: 1, reverse_split: 1, bonus: 1, rights: 1,
+    token_migration: 1, token_redenom: 1 };
+
+  function _candleDate(ts) {
+    var d = new Date(ts * 1000);
+    var mm = d.getMonth() + 1, dd = d.getDate();
+    return d.getFullYear() + '-' + (mm < 10 ? '0' : '') + mm + '-' + (dd < 10 ? '0' : '') + dd;
+  }
+  // 经验门控：只有观测跳空 ≈ 1/ratio 才认定"未复权"；≈1 视为已复权跳过。
+  function detectUnadjustedEvents(rows, actions) {
+    if (!rows || rows.length < 2 || !actions || !actions.length) return [];
+    var ordered = rows.slice().sort(function (a, b) { return a.ts - b.ts; });
+    var neighbors = {};
+    for (var i = 1; i < ordered.length; i++) {
+      var prev = ordered[i - 1], cur = ordered[i];
+      if (prev.c > 0 && cur.c > 0) neighbors[_candleDate(cur.ts)] = [prev.c, cur.c];
+    }
+    var eff = [];
+    for (var j = 0; j < actions.length; j++) {
+      var a = actions[j], obs = neighbors[a.d];
+      if (!obs) continue;
+      var expected = SHARE_CHANGE_KINDS[a.k] ? (1 / a.r) : 1;
+      if (!expected || !isFinite(expected)) continue;
+      var observed = obs[1] / obs[0];
+      if (Math.abs(observed - expected) / expected <= 0.12) eff.push(a);
+    }
+    return eff;
+  }
+  // 对原始价做前复权：除权日之前的 OHLC 乘 1/ratio，成交量乘 ratio。
+  function applyAdjustment(rows, actions) {
+    if (!actions || !actions.length) return rows;
+    var eff = detectUnadjustedEvents(rows, actions);
+    if (!eff.length) return rows;
+    return rows.map(function (r) {
+      var d = _candleDate(r.ts), pf = 1, vf = 1;
+      for (var i = 0; i < eff.length; i++) {
+        if (eff[i].d > d) { pf *= 1 / eff[i].r; vf *= eff[i].r; }
+      }
+      return candle(r.ts, r.o * pf, r.h * pf, r.l * pf, r.c * pf, r.v * vf, 'day');
+    });
+  }
+  // 腾讯 qfq：价格已前复权，只把成交量按份额事件放大到同口径。
+  function adjustVolumeOnly(rows, symbol) {
+    var actions = CORPORATE_ACTIONS[symbol];
+    if (!actions || !actions.length) return rows;
+    var usable = actions.filter(function (a) { return SHARE_CHANGE_KINDS[a.k]; });
+    if (!usable.length) return rows;
+    return rows.map(function (r) {
+      var d = _candleDate(r.ts), vf = 1;
+      for (var i = 0; i < usable.length; i++) {
+        if (usable[i].d > d) vf *= usable[i].r;
+      }
+      if (vf === 1) return r;
+      return candle(r.ts, r.o, r.h, r.l, r.c, r.v * vf, 'day');
+    });
+  }
+
   function parseDate(s) {
     // "2026-11-12" / "202611121500" / "2026-11-12 15:00:00"
     var str = String(s).trim();
@@ -1944,6 +2108,12 @@
   function fetchCandles(sym, interval) {
     var mk = marketOf(sym), code;
     if (mk === 'crypto') {
+      // 年K：Binance 无原生年线，与桌面端同口径用月线(1M)本地聚合，避免透传非法 interval。
+      if (interval === '1y') {
+        return http(BINANCE_KLINE + '?symbol=' + encodeURIComponent(sym + 'USDT') +
+          '&interval=1M&limit=1000')
+          .then(function (txt) { return aggregate(parseBinanceKlines(txt, '1M'), '1year', 'month'); });
+      }
       return http(BINANCE_KLINE + '?symbol=' + encodeURIComponent(sym + 'USDT') +
         '&interval=' + interval + '&limit=1000')
         .then(function (txt) { return parseBinanceKlines(txt, interval); });
@@ -1955,10 +2125,12 @@
         return http(SINA_US_DAY + encodeURIComponent(sym.slice(3).toLowerCase()))
           .then(function (txt) {
             var rows = parseSinaRows(txt, false);
+            // 新浪美股日线为原始价：按已核实拆股事件前复权后再聚合，保证多周期同口径。
+            rows = applyAdjustment(rows, CORPORATE_ACTIONS[sym]);
             return (interval === 'day') ? rows : aggregate(rows, interval, 'day');
           });
       }
-      var typeMap = { m5: '5', m15: '15', m30: '30', m60: '60' };
+      var typeMap = { m1: '1', m5: '5', m15: '15', m30: '30', m60: '60' };
       return http(SINA_US_MIN + encodeURIComponent(sym.slice(3).toLowerCase()) +
         '&type=' + (typeMap[interval] || '5'))
         .then(function (txt) { return parseSinaRows(txt, true); });
@@ -1971,6 +2143,8 @@
       encodeURIComponent(code + ',day,,,640,qfq');
     return http(url).then(function (txt) {
       var rows = parseTencentKlines(txt, 'day');
+      // 腾讯 qfq 已前复权价格，但成交量仍是原始份额 -> 补齐成交量口径。
+      rows = adjustVolumeOnly(rows, sym);
       if (interval === 'day') return rows;
       var mode = interval === '3day' ? '3day' : (interval === 'week' ? 'week'
         : (interval === 'month' ? 'month' : '1year'));
@@ -2014,29 +2188,41 @@
     ch.textContent = oc ? '—' : (t ? chgText(t.chg) : '--');
     ch.className = chgClass(t ? t.chg : null);
   }
+  // 判断一次 K 线异步回执是否仍是「当前有效请求」：
+  // 序号必须等于最新，且品种/周期仍与快照一致（防止快速往返同序号错配）。
+  function chartLoadIsCurrent(seq, sym, iv) {
+    return seq === chartLoadSeq && sym === CHART_SYMBOL && iv === CHART_INTERVAL;
+  }
   function loadChart() {
-    if (isOnchain(CHART_SYMBOL)) {
+    // 每次进入都递增序号，使此前所有在途请求的回执立即失效。
+    var seq = ++chartLoadSeq;
+    var sym = CHART_SYMBOL, iv = CHART_INTERVAL;
+    if (isOnchain(sym)) {
       // 没有交易所 K 线：画本设备采集的真实报价走势 + 真实链上结构数据，
       // 明确标注「非 K 线」；不发必然失败的 K 线请求，也不画假蜡烛。
       CANDLES = [];
       $('chartNote').textContent = '链上真实报价走势（本设备采样）· 来源 ' +
         OC_SOURCE + ' · 非交易所 K 线，无 OHLC / 成交量';
       drawChart();
-      refreshOnchain([CHART_SYMBOL], true);   // 打开时取一次真实快照
+      refreshOnchain([sym], true);   // 打开时取一次真实快照
       return;
     }
-    $('chartNote').textContent = '正在加载 ' + CHART_SYMBOL + ' K 线（' + CHART_INTERVAL + '）…';
+    $('chartNote').textContent = '正在加载 ' + sym + ' K 线（' + iv + '）…';
     CANDLES = [];
     drawChart();
-    fetchCandles(CHART_SYMBOL, CHART_INTERVAL).then(function (rows) {
-      CANDLES = rows;
+    fetchCandles(sym, iv).then(function (rows) {
+      // 迟到 / 已切换品种或周期：丢弃，绝不触碰当前图表状态。
+      if (!chartLoadIsCurrent(seq, sym, iv)) return;
+      CANDLES = rows || [];
       VIEW.count = clamp(VIEW.count || 90, 20, 400);
       VIEW.pan = Number(VIEW.pan) || 0;   // 保留上次的自由位置（含右侧留白）
-      $('chartNote').textContent = rows.length
-        ? '共 ' + rows.length + ' 根真实 K 线 · 左右拖动平移 · 双指或 ＋/－ 缩放'
+      $('chartNote').textContent = CANDLES.length
+        ? '共 ' + CANDLES.length + ' 根真实 K 线 · 左右拖动平移 · 双指或 ＋/－ 缩放'
         : '该品种暂无公开 K 线数据（数据源未返回）';
       drawChart();
     }).catch(function (e) {
+      // 旧请求的失败也不能把当前新请求的界面改成「加载失败」。
+      if (!chartLoadIsCurrent(seq, sym, iv)) return;
       $('chartNote').textContent = 'K 线加载失败：' + (e && e.message ? e.message : '网络异常') +
         ' · 点「最新」或切换周期重试';
       drawChart();
@@ -2666,6 +2852,7 @@
         try { obj = JSON.parse(text); }
         catch (e) { toast('JSON 格式错误，未做任何修改'); return; }
         if (!obj || typeof obj !== 'object') { toast('内容不是配置对象'); return; }
+        normalizeImportedConfig(obj);
         var n = 0;
         for (var i = 0; i < IMPORT_KEYS.length; i++) {
           var k = IMPORT_KEYS[i];
@@ -3107,6 +3294,9 @@
     cfg: CFG, all: ALL, tickers: TICKERS, meta: META,
     parseTencent: parseTencent, parseBinance: parseBinance,
     parseBinanceKlines: parseBinanceKlines, parseTencentKlines: parseTencentKlines,
+    parseSinaRows: parseSinaRows, aggregateKlines: aggregate,
+    corporateActions: CORPORATE_ACTIONS, detectUnadjustedEvents: detectUnadjustedEvents,
+    applyAdjustment: applyAdjustment, adjustVolumeOnly: adjustVolumeOnly,
     applyCoinLore: applyCoinLore, computeOrder: computeOrder,
     detailHTML: detailHTML, setSort: setSort, setPinned: setPinned,
     rankValue: rankValue, http: http, refreshTickers: refreshTickers,
@@ -3118,7 +3308,8 @@
     parseRugcheck: parseRugcheck, addContract: addContract,
     refreshOnchain: refreshOnchain, applyOnchainQuote: applyOnchainQuote,
     onchainQuotes: ONCHAIN_Q, contractHitHTML: contractHitHTML,
-    rowHTML: rowHTML, renderList: renderList, loadChart: loadChart,
+    rowHTML: rowHTML, renderList: renderList, scheduleRender: scheduleRender,
+    loadChart: loadChart, applyTickers: applyTickers, quoteIsStale: _quoteIsStale,
     updateChartHead: updateChartHead, intervalsFor: intervalsFor,
     // v34：指标参数 / 搜索独立页 / 自由平移 / 图标
     normInd: normInd, indParams: indParams, writeIndParams: writeIndParams,
@@ -3145,6 +3336,11 @@
     setSearch: function (q) { SEARCH_TEXT = String(q || ''); renderList(); },
     setChartSymbol: function (s) { CHART_SYMBOL = s; },
     setCandles: function (rows) { CANDLES = rows; },
+    // K 线竞态回归：只读观测点（不改变行为）
+    candles: function () { return CANDLES; },
+    loadSeq: function () { return chartLoadSeq; },
+    symbol: function () { return CHART_SYMBOL; },
+    interval: function () { return CHART_INTERVAL; },
     view: function () { return VIEW; },
     page: function () { return PAGE; },
     sheet: function () { return openSheetId; },

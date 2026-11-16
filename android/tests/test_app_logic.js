@@ -423,6 +423,21 @@ async function onchainTests() {
     return c.onchain && c.onchain[OC] &&
       c.onchain[OC].code === 'ANSEM' && c.symbols.indexOf(OC) >= 0;
   })());
+  ok('跨端导入：桌面 onchain_symbols 键映射到 Android onchain', (function () {
+    D.importConfig();
+    const desktop = { onchain_symbols: {
+      'ONCHAIN:desktopaddr': { address: 'desktopaddr', code: 'DST', name: 'Desktop Coin' }
+    } };
+    el('textSheetInput').value = JSON.stringify(desktop);
+    el('textSheetOk').onclick(el('textSheetInput').value);
+    const okMap = !!D.cfg.onchain['ONCHAIN:desktopaddr'] &&
+      D.cfg.onchain['ONCHAIN:desktopaddr'].code === 'DST';
+    // 恢复：用原生 onchain 键把状态还原，避免影响后续用例
+    D.importConfig();
+    el('textSheetInput').value = JSON.stringify({ onchain: {} });
+    el('textSheetOk').onclick(el('textSheetInput').value);
+    return okMap && !D.cfg.onchain['ONCHAIN:desktopaddr'];
+  })());
 
   // 其它链没有可直连报价源：允许收藏，但明确标注无价格，不编造
   const evm = '0x' + 'a'.repeat(40), evmSym = D.ocSymbol(evm);

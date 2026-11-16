@@ -118,9 +118,34 @@ def for_symbol(symbol: str) -> Dict[str, Any]:
         candles = klines.fetch_klines(symbol, interval)
         src = ("Binance 月 K" if not is_stock
                else "腾讯 / 新浪日 K 聚合月线")
+
+        # 复权口径说明：从 klines 的复权报告读取，明确标注统计基于何种价格。
+        basis_note = ""
+        adj_report = {}
+        try:
+            adj_report = klines.adjustment_report(symbol)
+        except Exception:
+            pass
+        applied = adj_report.get("applied") or []
+        if applied:
+            basis_note = ("；已按已核实公司行为（拆股/反向拆股/分红等）复权 "
+                          f"共 {len(applied)} 项，价格与成交量同口径")
+        anomalies = adj_report.get("anomalies") or []
+        unverified = [a for a in anomalies if a.get("kind") == "unconfirmed_event"]
+        if unverified:
+            basis_note += (f"；⚠ {len(unverified)} 项公司行为比例未确认，"
+                           "已保留原始数据并标记异常，未做复权")
+
         note = ("统计区间以数据源本次返回的历史为准；"
-                "A 股 / 港股单次约 640 根日线，不等同于上市以来全历史")
-        return from_candles(candles, src, "月 K", note)
+                "A 股 / 港股单次约 640 根日线，不等同于上市以来全历史"
+                + basis_note)
+        result = from_candles(candles, src, "月 K", note)
+        result["adjust_basis"] = (
+            "forward-adjusted" if applied else
+            ("unverified-events-flagged" if unverified else "source-native"))
+        result["adjustments"] = [a.get("ex_date") for a in applied]
+        result["anomaly_count"] = len(anomalies)
+        return result
     except Exception as e:
         return {"ok": False, "reason": str(e),
                 "source": "历史 K 线接口"}

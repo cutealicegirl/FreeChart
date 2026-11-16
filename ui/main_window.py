@@ -30,6 +30,7 @@ from core.autostart import set_enabled as set_autostart
 from core.config import DEFAULT_SYMBOLS, Config
 from core import brand, onchain_history
 from core.live_feed import LiveFeed
+from core.thread_cleanup import _ORPHAN_THREADS
 from core.updater import RefreshScheduler, SearchWorker
 from data import onchain, rank_meta, stock_logo
 from data.contract_search import ContractWorker, is_contract
@@ -158,9 +159,14 @@ def make_tray_icon():
 
 
 class _RankSignals(QObject):
-    """后台元数据线程回主线程的桥（跨线程必须用 Qt 信号）。"""
+    """后台元数据线程回主线程的桥（跨线程必须用 Qt 信号）。
 
-    ready = Signal(dict)
+    载荷带 key 与请求序号：
+      - key 让回调用「请求所属市场」重排，而非回调瞬间当前市场（防错配）；
+      - seq 让旧请求结果被丢弃（防慢请求覆盖新请求）。
+    """
+
+    ready = Signal(str, dict, int)
 
 
 class OnchainWorker(QThread):
@@ -557,6 +563,13 @@ class MainWindow(QMainWindow):
         self._narrow = False
         self._rank_meta = rank_meta.load_cached()
         self._rank_ready = {k: False for k, _, _ in MARKET_GROUPS}
+        # 元数据异步任务状态机：IDLE / LOADING / SUCCESS / FAILED。
+        # _rank_ready 保留旧含义「已成功取到可用数据」供既有测试断言，
+        # 真正的并发/重试控制改用 _rank_state + 退避时间戳。
+        self._rank_state = {k: "IDLE" for k, _, _ in MARKET_GROUPS}
+        self._rank_seq = {k: 0 for k, _, _ in MARKET_GROUPS}  # 每市场请求序号
+        self._rank_fail = {k: 0 for k, _, _ in MARKET_GROUPS}  # 连续失败次数
+        self._rank_next_at = {k: 0.0 for k, _, _ in MARKET_GROUPS}  # 退避截止
         self._rank_signals = _RankSignals(self)
         self._rank_signals.ready.connect(self._on_rank_meta)
         # 内置清单本身由真实市值榜生成，预建位次表供「默认排序」使用
@@ -1453,33 +1466,92 @@ class MainWindow(QMainWindow):
         menu.exec(self.btn_sort_menu.mapToGlobal(
             self.btn_sort_menu.rect().bottomLeft()))
 
+    @staticmethod
+    def _rank_data_valid(data: dict) -> bool:
+        """判断元数据结果是否「有效」（区别于离线/失败的纯 None 空壳）。
+
+        只要有一个品种拿到真实数值（cap / turnover / listed_year 任一），
+        就算本次取数成功；全部是 None 或空字典视为失败，允许退避后重试。
+        """
+        if not data:
+            return False
+        for row in data.values():
+            if not isinstance(row, dict):
+                continue
+            for field in ("cap", "turnover", "listed_year"):
+                v = row.get(field)
+                if v is not None and v != "":
+                    return True
+        return False
+
     def _ensure_rank_meta(self, key: str):
         """需要市值 / 流动性 / 上市时间时，后台批量取真实元数据。
 
-        只取当前市场的清单（一次 CoinLore 缓存 + 每 60 只一次腾讯批量），
-        回来再重排一次；取数期间 UI 不阻塞、不弹窗。
+        状态机：IDLE -> LOADING -> SUCCESS / FAILED ->（退避后）IDLE。
+          - 只挡 LOADING（同一市场不并发），且 SUCCESS 后不重复取；
+          - FAILED 允许重试，但按 5/10/20…秒指数退避，防网络故障时刷屏；
+          - 请求带序号，旧请求结果即便迟到也不会覆盖新请求;
+          - 每个市场状态独立。
         """
-        if self._rank_ready.get(key):
+        state = self._rank_state.get(key, "IDLE")
+        if state == "LOADING":
+            return                       # 同一市场不并发
+        # SUCCESS 且 ready 仍为真才跳过；若 ready 被手动置 False（强制重试
+        # 契约，见 test_release_v28）则视为需要重新取数。
+        if state == "SUCCESS" and self._rank_ready.get(key):
             return
+        if state == "FAILED" and time.time() < self._rank_next_at.get(key, 0):
+            return                       # 退避期内，不重复请求
         mode = self.combo_sort.currentData()
         if mode not in META_SORT_MODES:
             return
         syms = list(self._all_order.get(key) or all_of(key))
         if not syms:
             return
-        self._rank_ready[key] = True
+        self._rank_state[key] = "LOADING"
+        self._rank_seq[key] = self._rank_seq.get(key, 0) + 1
+        seq = self._rank_seq[key]
         self.status.set_progress("正在获取市值 / 流动性 / 上市时间…")
 
-        def work():
+        def work(k=key, s=seq, symbols=syms):
             try:
-                data = rank_meta.snapshot(syms)
+                data = rank_meta.snapshot(symbols)
             except Exception:
                 data = {}
-            self._rank_signals.ready.emit(data)
+            self._rank_signals.ready.emit(k, data or {}, s)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_rank_meta(self, data: dict):
+    def _on_rank_meta(self, key_or_data, data=None, seq=None):
+        """元数据回执。兼容两种调用：
+
+          - 信号路径：_on_rank_meta(key, data, seq)  —— 带市场与序号；
+          - 旧式直接调用：_on_rank_meta(data)        —— 测试/内部，按当前市场。
+        """
+        if data is None:
+            data = key_or_data or {}
+            key = self._current_market()
+            seq = None
+        else:
+            key = key_or_data
+        # 迟到请求：只接受序号匹配当前最新一次的结果
+        if seq is not None and seq != self._rank_seq.get(key):
+            return
+
+        valid = self._rank_data_valid(data)
+        if valid:
+            self._rank_state[key] = "SUCCESS"
+            self._rank_ready[key] = True
+            self._rank_fail[key] = 0
+        else:
+            # 失败 / 纯 None 空结果：允许重试，并按指数退避抑制刷屏
+            self._rank_state[key] = "FAILED"
+            self._rank_ready[key] = False
+            fails = self._rank_fail.get(key, 0) + 1
+            self._rank_fail[key] = fails
+            backoff = min(5 * (2 ** (fails - 1)), 120)
+            self._rank_next_at[key] = time.time() + backoff
+
         # 只补真实数值，绝不让离线 / 断网兜底的 None 覆盖已有真实数据
         # （与阶段 1 资料卡同源问题：异步兜底回来把页上的真值洗掉了）。
         for sym, row in (data or {}).items():
@@ -1492,13 +1564,14 @@ class MainWindow(QMainWindow):
                 elif k not in cur:
                     cur[k] = v
             self._rank_meta[sym] = cur
-        key = self._current_market()
+        # 用「请求所属市场」重排，而非回调瞬间的当前市场，避免切页错配
         if self.combo_sort.currentData() in META_SORT_MODES:
             self._relayout_page(key)
             have = sum(1 for s in (self._all_order.get(key) or [])
                        if (self._rank_meta.get(s) or {}).get("cap") is not None)
             self.status.set_progress(
-                f"排序依据：CoinLore / 腾讯行情真实数据 · 有市值 {have} 个品种")
+                f"排序依据：CoinLore / 腾讯行情真实数据 · 有市值 {have} 个品种"
+                + ("" if valid else "（本次取数失败，稍后自动重试）"))
         else:
             self._update_load_progress(key)
 
@@ -2416,6 +2489,7 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+        self.scheduler.start()   # 幂等：确保隐藏期间若被停过也能恢复刷新
 
     def _show_from_badge(self):
         self.reveal()
@@ -2619,7 +2693,18 @@ class MainWindow(QMainWindow):
             worker.finished_all.disconnect(self._on_prefetch_done)
         except (RuntimeError, TypeError):
             pass
-        worker.stop()
+        clean = worker.stop()
+        if not clean:
+            # wait 超时仍在运行：脱离对象树并保活，禁止随父对象析构销毁
+            # 用 getattr 兼容测试里的 duck-typed worker（无 setParent）。
+            setter = getattr(worker, "setParent", None)
+            if callable(setter):
+                try:
+                    setter(None)
+                except (RuntimeError, TypeError):
+                    pass
+            if worker not in _ORPHAN_THREADS:
+                _ORPHAN_THREADS.append(worker)
 
     def _on_prefetch_progress(self, text: str):
         # 状态栏空间有限：只显示简短进度，完整信息放 tooltip
@@ -2649,6 +2734,7 @@ class MainWindow(QMainWindow):
         else:
             self.show()
             self.activateWindow()
+            self.scheduler.start()   # 幂等：托盘恢复时确保刷新在运行
 
     def hide_to_tray(self):
         self.hide()
@@ -2815,6 +2901,21 @@ class MainWindow(QMainWindow):
                 self.status.set_note("")
         self._close_settings_page()
 
+    def _shutdown_search_workers(self):
+        """退出时收尾搜索 / 合约 / 链上三类短命 QThread。
+
+        这些线程 parent 都是本窗口，退出瞬间若在途，会被 Qt 对象树销毁
+        而触发 "Destroyed while thread is still running" 崩溃。统一走
+        中断 -> 等待 -> 保活范式（保活列表见 core.thread_cleanup）。
+        """
+        for attr in ("_search_worker", "_contract_worker", "_onchain_worker"):
+            worker = getattr(self, attr, None)
+            if worker is None:
+                continue
+            from core.thread_cleanup import safe_stop_thread
+            safe_stop_thread(worker, wait_ms=1500)
+            setattr(self, attr, None)
+
     def quit_app(self):
         self._force_quit = True
         # 复用的详情抽屉是顶层窗口，退出前必须逐个收掉，否则 Qt 卸载时
@@ -2835,9 +2936,10 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
         try:
-            self.chart_view.stop_prefetch()
+            self.chart_view.shutdown_threads()
         except Exception:
             pass
+        self._shutdown_search_workers()
         stock_logo.stop()
         self.tray.hide()
         if hasattr(self, "price_badge"):
@@ -3052,7 +3154,9 @@ class MainWindow(QMainWindow):
 
     # ================= 关闭行为 =================
     def closeEvent(self, event):
-        self.scheduler.stop()
+        # 严格区分「隐藏到托盘」与「真正退出」：
+        # 只有真正退出才停刷新调度器。旧实现无条件 stop()，导致 Alt+F4
+        # 隐藏到托盘后行情永久停止刷新（RefreshScheduler 又无 start()）。
         if self._list_geometry is not None:
             x, y, w, h = self._list_geometry
             self._list_geometry = None
@@ -3060,7 +3164,8 @@ class MainWindow(QMainWindow):
             self._resize_for_restore(w, h)
         self.save_geometry()
         if self._force_quit:
+            self.scheduler.stop()
             event.accept()
         else:
             event.ignore()
-            self.hide()
+            self.hide()              # 隐藏到托盘：调度器继续运行

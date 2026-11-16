@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
                                QVBoxLayout, QWidget)
 
 from core import indicator_params, onchain_history
+from core.thread_cleanup import safe_stop_thread
 from data import kline_cache, onchain
 from data.klines import (HistoryWorker, KlineWorker, default_interval,
                          intervals_for, refresh_seconds)
@@ -52,68 +53,12 @@ DIF_COLOR = C_ACCENT
 DEA_COLOR = "#e040fb"
 
 
-# ================= 指标计算（纯函数） =================
-def _ema_series(values, n):
-    """EMA 序列（与 closes 等长，前段为 None 预热）。"""
-    out = [None] * len(values)
-    if len(values) < n:
-        return out
-    k = 2.0 / (n + 1)
-    e = sum(values[:n]) / n
-    out[n - 1] = e
-    for i in range(n, len(values)):
-        e = values[i] * k + e * (1 - k)
-        out[i] = e
-    return out
-
-
-def ma_series(closes, n):
-    """简单移动平均 MA(n)，前 n-1 个为 None。"""
-    out = [None] * len(closes)
-    s = 0.0
-    for i, v in enumerate(closes):
-        s += v
-        if i >= n:
-            s -= closes[i - n]
-        if i >= n - 1:
-            out[i] = s / n
-    return out
-
-
-def boll_series(closes, n=20, k=2.0):
-    """布林线 BOLL(n,k)：返回 (上轨, 中轨, 下轨)。
-
-    中轨 = MA(n)，上下轨 = 中轨 ± k × 总体标准差（与通达信/币安一致）。
-    """
-    size = len(closes)
-    upper = [None] * size
-    mid = [None] * size
-    lower = [None] * size
-    for i in range(n - 1, size):
-        window = closes[i - n + 1:i + 1]
-        m = sum(window) / n
-        std = math.sqrt(sum((v - m) ** 2 for v in window) / n)
-        mid[i] = m
-        upper[i] = m + k * std
-        lower[i] = m - k * std
-    return upper, mid, lower
-
-
-def macd_series(closes, fast=12, slow=26, signal=9):
-    """MACD(12,26,9)：返回 (DIF, DEA, HIST)，hist=2*(DIF-DEA) 国内惯例。"""
-    ef = _ema_series(closes, fast)
-    es = _ema_series(closes, slow)
-    dif = [None if (a is None or b is None) else a - b
-           for a, b in zip(ef, es)]
-    valid = [(i, v) for i, v in enumerate(dif) if v is not None]
-    dea = [None] * len(closes)
-    if len(valid) >= signal:
-        e9 = _ema_series([v for _, v in valid], signal)
-        for j, (i, _) in enumerate(valid):
-            dea[i] = e9[j]
-    hist = [None if (d is None or e is None) else 2 * (d - e)
-            for d, e in zip(dif, dea)]
-    return dif, dea, hist
+# ================= 指标计算（纯函数，取自 core.indicators 共享实现） =================
+# 桌面端与 Android H5 共用 core/indicators.py 的公式基准，
+# 此处再导出以保持历史导入路径（from ui.chart_view import ma_series 等）兼容。
+from core.indicators import (
+    _ema_series, ma_series, boll_series, macd_series,
+)
 
 
 class CandleChart(QWidget):
@@ -2871,18 +2816,29 @@ class ChartView(QWidget):
             self.chart.animate_last_price(float(price))
 
     def stop_prefetch(self):
-        """退出前收尾周期预加载线程，避免 QThread 析构崩溃。"""
+        """退出前收尾周期预加载线程，避免 QThread 析构崩溃。
+
+        旧实现 wait(3s) 后无条件 clear()：单次 fetch_klines 的 socket
+        timeout 是 10s，3s 不够，超时线程引用被丢弃 yet 仍在运行，
+        退出时父对象析构会销毁运行中的 QThread -> Qt fail-fast。
+        现用统一范式：等待后复查 isRunning，仍运行的脱离对象树并保活。
+        """
         for worker in list(self._prefetch_threads):
-            try:
-                worker.requestInterruption()
-            except RuntimeError:
-                pass
-        for worker in list(self._prefetch_threads):
-            try:
-                worker.wait(3000)
-            except RuntimeError:
-                pass
+            safe_stop_thread(worker, wait_ms=3000)
         self._prefetch_threads.clear()
+
+    def shutdown_threads(self):
+        """退出时统一收尾本页持有的所有网络 QThread。
+
+        覆盖 K 线主请求、历史回溯、周期预缓存三类。它们 parent 都是本
+        ChartView，若不收尾，退出瞬间仍在跑时会被 Qt 对象树销毁崩溃。
+        """
+        for attr in ("_worker", "_hist_worker"):
+            worker = getattr(self, attr, None)
+            if worker is not None:
+                safe_stop_thread(worker, wait_ms=2000)
+                setattr(self, attr, None)
+        self.stop_prefetch()
 
     def _update_ticker(self, t):
         # 光标涨跌幅要用「当前市场价」做基准，不能用最后一根 K 线收盘价

@@ -1,0 +1,76 @@
+{
+  "_readme": [
+    "已核实公司行为登记库（随项目发布，可人工审计）。",
+    "ratio 语义 = 除权后每 1 份旧份额换到的新份额数；价格前复权因子 = 1/ratio。",
+    "confidence=verified 且比例确定 才会被复权引擎采用；其余只标记异常、保留原始数据。",
+    "source_rebased=true 表示数据源已自行重算历史，本引擎不再重复复权（防止重复复权）。",
+    "出处：公司投资者关系公告 / 交易所公告 / 权威财经媒体，均为公开可查事实。"
+  ],
+  "actions": [
+    {
+      "symbol": "US:AAPL", "ex_date": "2020-08-31", "kind": "split", "ratio": 4.0,
+      "source": "Apple Inc. 2020-07-30 董事会公告；投资者关系拆股历史", "confidence": "verified",
+      "note": "1 拆 4，除权日 2020-08-31 开盘生效"
+    },
+    {
+      "symbol": "US:AAPL", "ex_date": "2014-06-09", "kind": "split", "ratio": 7.0,
+      "source": "Apple Inc. 2014 拆股公告；投资者关系拆股历史", "confidence": "verified",
+      "note": "1 拆 7"
+    },
+    {
+      "symbol": "US:AAPL", "ex_date": "2005-02-28", "kind": "split", "ratio": 2.0,
+      "source": "Apple 投资者关系拆股历史", "confidence": "verified", "note": "1 拆 2"
+    },
+    {
+      "symbol": "US:AAPL", "ex_date": "2000-06-21", "kind": "split", "ratio": 2.0,
+      "source": "Apple 投资者关系拆股历史", "confidence": "verified", "note": "1 拆 2"
+    },
+    {
+      "symbol": "US:TSLA", "ex_date": "2022-08-25", "kind": "split", "ratio": 3.0,
+      "source": "Tesla 2022-08-05 公告；SEC 8-K", "confidence": "verified", "note": "1 拆 3"
+    },
+    {
+      "symbol": "US:TSLA", "ex_date": "2020-08-31", "kind": "split", "ratio": 5.0,
+      "source": "Tesla 2020-08-11 公告；SEC 8-K", "confidence": "verified", "note": "1 拆 5"
+    },
+    {
+      "symbol": "US:NVDA", "ex_date": "2024-06-10", "kind": "split", "ratio": 10.0,
+      "source": "NVIDIA 2024-05-22 公告；SEC 8-K", "confidence": "verified", "note": "1 拆 10"
+    },
+    {
+      "symbol": "US:NVDA", "ex_date": "2021-07-20", "kind": "split", "ratio": 4.0,
+      "source": "NVIDIA 2021 拆股公告；SEC 8-K", "confidence": "verified", "note": "1 拆 4"
+    },
+    {
+      "symbol": "US:AMZN", "ex_date": "2022-06-06", "kind": "split", "ratio": 20.0,
+      "source": "Amazon 2022-03-09 公告；SEC 8-K", "confidence": "verified", "note": "1 拆 20"
+    },
+    {
+      "symbol": "US:GOOGL", "ex_date": "2022-07-18", "kind": "split", "ratio": 20.0,
+      "source": "Alphabet 2022 拆股公告；SEC 8-K", "confidence": "verified", "note": "1 拆 20"
+    },
+    {
+      "symbol": "US:MSFT", "ex_date": "2003-02-18", "kind": "split", "ratio": 2.0,
+      "source": "Microsoft 拆股历史；投资者关系", "confidence": "verified", "note": "1 拆 2"
+    },
+    {
+      "symbol": "SH:600519", "ex_date": "2024-06-19", "kind": "unknown", "ratio": 1.0,
+      "source": "东财分红送配数据源（当前 offline 环境未能取到精确除权前收盘）", "confidence": "reported",
+      "note": "现金分红事件已探测到，但缺少可信的除权前收盘价，无法计算精确复权因子；按规则保留原始数据并标记异常，不猜测比例。接入可信源补全 prev_close 后改为 verified 才会生效"
+    }
+  ],
+  "migrations": [
+    {
+      "old_symbol": "RNDR", "new_symbol": "RENDER", "effective_date": "2024-06-25",
+      "ratio": 1.0, "source_rebased": true,
+      "source": "Render Network RNDR→RENDER 1:1 代币迁移官方公告", "confidence": "verified",
+      "note": "1:1 更名迁移；Binance 等主流源已用新代码重算历史，标记 rebased 防止重复处理"
+    },
+    {
+      "old_symbol": "MATIC", "new_symbol": "POL", "effective_date": "2024-09-04",
+      "ratio": 1.0, "source_rebased": true,
+      "source": "Polygon MATIC→POL 1:1 迁移官方公告", "confidence": "verified",
+      "note": "1:1 迁移，主流源已重算历史"
+    }
+  ]
+}

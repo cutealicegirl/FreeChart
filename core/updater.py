@@ -73,12 +73,13 @@ class RefreshScheduler(QObject):
         self._worker: FetchWorker | None = None
         self._next_at = 0.0          # 下次应发起请求的时间戳
         self._pending_force = False  # force 撞上在途请求，结束后补一次
+        self._running = False        # 调度器是否被显式停止（stop 后置 False）
 
         # 心跳定时器：每秒检查是否到刷新时间
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
+        self.start()                 # 幂等启动，避免 stop 后无法恢复
 
         # 阶段 2：请求合并。切市场 / 切子页 / 增删自选 / 滚动加载更多
         # 往往在同一帧里连着调好几次 refresh_now()，旧版每次都排队一次
@@ -92,6 +93,18 @@ class RefreshScheduler(QObject):
         self._last_request_at = 0.0
 
     # ---- 对外接口 ----
+    def start(self):
+        """（重新）启动心跳调度，幂等。
+
+        托盘恢复 / 窗口重新显示时调用。旧实现只有构造时 start 一次，
+        stop() 后无任何途径恢复，Alt+F4 隐藏到托盘后行情永久停刷。
+        """
+        if self._running:
+            return
+        self._running = True
+        self._next_at = 0.0          # 恢复后下一拍即安排一轮刷新
+        self._timer.start()
+
     def set_symbols(self, symbols):
         new = list(symbols)
         if new != self._symbols:
@@ -125,6 +138,7 @@ class RefreshScheduler(QObject):
         正常路径下 worker 早已结束并由 _on_worker_done 清空引用，
         这里几乎不会真的等待，不影响关窗体验。
         """
+        self._running = False
         self._timer.stop()
         self._burst.stop()
         self._pending_force = False
@@ -156,6 +170,8 @@ class RefreshScheduler(QObject):
         return self._interval
 
     def _tick(self, force=False):
+        if not self._running:
+            return                   # 已 stop：忽略任何残留的定时器/补发触发
         now = time.time()
         if not force and now < self._next_at:
             return
