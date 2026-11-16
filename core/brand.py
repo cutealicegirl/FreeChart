@@ -18,7 +18,7 @@ APP_NAME = "Free Chart"
 APP_SUBTITLE = "全市场行情 · 品种档案"
 APP_TITLE = "Free Chart · 全市场行情"
 APP_TAGLINE = "自由缩放 K 线 · 跨市场行情 · 品种发展历程"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.4.0"
 
 # 内部标识：文件名 / 配置目录 / 单实例锁 / 包名 / 注册表键名
 APP_ID = "CryptoTicker"

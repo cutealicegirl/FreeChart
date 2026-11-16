@@ -12,9 +12,9 @@
 ; 注意：脚本假定 dist/Free Chart.exe 已存在（先跑 PyInstaller 打包）。
 ; ─────────────────────────────────────────────────────────────────────────
 #define MyAppName "Free Chart"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.4.0"
 #define MyAppPublisher "Free Chart contributors"
-#define MyAppURL "https://github.com/your-org/FreeChart"
+#define MyAppURL "https://github.com/cutealicegirl/FreeChart"
 #define MyExe "Free Chart.exe"
 
 [Setup]
