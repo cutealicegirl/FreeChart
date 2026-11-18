@@ -17,9 +17,23 @@
 数据红线
 --------
 1. 只返回接口真实返回的 OHLCV；拿不到就返回空并标注原因，绝不插值 / 外推 /
-   复制当前价到过去 / 拼接不同交易对。
+   复制当前价到过去 / 拼接不同交易对 / 跨池无缝衔接。
 2. 每根 K 线都做 OHLC 约束、成交量非负、时间戳单位与排序去重校验。
 3. 价格单位统一为 USD（接口 currency=usd）；时间戳统一为 Unix 秒。
+
+数据源真实能力评估（按任务书要求如实标注，未验证的不声称支持）
+-------------------------------------------------------------
+- GeckoTerminal API v2：主源，免费无 key，返回真实分钟~月 OHLCV 与成交量；
+  本实现 1m~12h 走真实分钟/小时线，1d 走日线，3d/1w/1M 用真实日线聚合。
+- CoinGecko onchain OHLC：备源，免费无 key，仅**日线** OHLC、无成交量；
+  分钟/小时周期明确拒绝，绝不把日线伪装成低周期。
+- DexScreener：仅用于合约搜索/实时价格与交易对元数据（contract_search），
+  其公开 API **不提供历史 OHLCV 时间序列**，故不作为 K 线数据源。
+- Birdeye / Defined：需 API key 或商业授权，本项目未接入，不声称支持。
+- 链覆盖：Solana / Tron / EVM（ETH/BNB/Base/Arbitrum/Polygon/Avalanche/
+  Optimism/Fantom）由 GeckoTerminal 网络候选探测；Sui / TON 目前
+  GeckoTerminal OHLCV 的支持在本环境无法稳定验证，未纳入候选，遇到会
+  明确给出「未找到交易池 / 数据源不可用」，不伪造 K 线。
 """
 from __future__ import annotations
 

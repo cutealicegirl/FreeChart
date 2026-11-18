@@ -2332,7 +2332,11 @@
   // 只取真实 OHLCV，拿不到就回退采样折线，绝不插值 / 伪造。
   var GT_BASE = 'https://api.geckoterminal.com/api/v2';
   var CG_OHLC = 'https://api.coingecko.com/api/v3/coins/{p}/contract/{a}/ohlc';
-  var OC_KLINE_CACHE = readJSON('ct_oc_kline', {});   // { sym|iv: {bars, pool, ts} }
+  // v2：数据结构加入 pool（交易池身份）与 volume_reliable（成交量可靠性）。
+  // 版本写在缓存体内，schema 变更时一次性丢弃旧格式，避免跨口径拼接。
+  var OC_KLINE_SCHEMA = 'oc-v2-pool-volume';
+  var OC_KLINE_CACHE = readJSON('ct_oc_kline', {});
+  if (OC_KLINE_CACHE.v !== OC_KLINE_SCHEMA) OC_KLINE_CACHE = { v: OC_KLINE_SCHEMA };
   var OC_POOL_CACHE = readJSON('ct_oc_pools', {});     // { addr: {net, pool, ts} }
   var OC_TF = {
     '1m': ['minute', 1], '5m': ['minute', 5], '15m': ['minute', 15],
@@ -4175,6 +4179,11 @@
     // K 线同样受保留期约束（此前只清 TICKERS，缓存会悄悄陈旧）
     KLINE_CACHE = {};
     writeJSON('ct_kline', KLINE_CACHE);
+    // 链上 K 线 / 池缓存也一并清理，保留版本字段，避免陈旧池指向已迁移交易池
+    OC_KLINE_CACHE = { v: OC_KLINE_SCHEMA };
+    OC_POOL_CACHE = {};
+    writeJSON('ct_oc_kline', OC_KLINE_CACHE);
+    writeJSON('ct_oc_pools', OC_POOL_CACHE);
   }
   function boot() {
     applyTheme();
