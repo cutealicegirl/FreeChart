@@ -18,6 +18,7 @@ import hashlib
 import json
 import re
 import struct
+from typing import List
 
 from PySide6.QtCore import QThread, Signal
 
@@ -78,6 +79,14 @@ KNOWN = {
     "4k3dyjzvzp8emzwuxbbcjevwskkk59s5icnly3qrkx6r": ("RAY", "Raydium", "Solana"),
     "epjfwdd5aufqssqem2qn1xzybapc8g4weggkzwytdt1v":
         ("USDC", "USD Coin", "Solana"),
+    # 以下为公开可查的主流 Meme / DeFi 代币合约（Blockchain.com / Bitcoin.com /
+    # BaseScan 等权威页面核对），用于「输入名称能搜到链上币」的本地兜底。
+    "9bb6nfecjbctnnlfko2fqvqbq8hhm13kcyycdqbgpump":
+        ("FARTCOIN", "Fartcoin", "Solana"),
+    "7gcihgdb8fe6knjn2mytkzzcrjqy3t9ghdc8uhymw2hr":
+        ("POPCAT", "Popcat", "Solana"),
+    "0x532f27101965dd16442e59d40670faf5ebb142e4":
+        ("BRETT", "Based Brett", "Base"),
 }
 
 
@@ -334,6 +343,38 @@ def _empty(address: str) -> dict:
     return {"address": address, "symbol": "", "name": "", "chain": "",
             "price": "", "change": "", "url": "", "tradable": False,
             "supply": 0.0, "program": "", "exists": False}
+
+
+def search_by_name(query: str, limit: int = 8) -> List[dict]:
+    """按名称 / Symbol / 别名搜索内置链上代币索引（离线，零网络）。
+
+    这是"名称能搜到链上币"的本地兜底：内置 KNOWN 表覆盖主流 EVM/Solana
+    代币；匹配忽略大小写与多余空格，支持精确 / 前缀 / 子串。
+    返回统一资产字典，身份用 chain + 合约地址（关联 ID，
+    不靠 symbol 合并资产，避免同名 / 不同链混淆）。
+    """
+    q = " ".join((query or "").strip().lower().split())
+    if not q:
+        return []
+    exact, prefix, partial = [], [], []
+    for addr, (sym, name, chain) in KNOWN.items():
+        fields = [str(sym).lower(), str(name).lower()]
+        if any(f == q for f in fields):
+            bucket = exact
+        elif any(f.startswith(q) for f in fields):
+            bucket = prefix
+        elif any(q in f for f in fields):
+            bucket = partial
+        else:
+            continue
+        bucket.append({
+            "symbol": sym, "name": name, "chain": chain,
+            "address": addr, "asset_type": "onchain_token",
+            "market": chain, "source": "本地代币索引",
+            # 统一身份：链 + 地址，避免不同链同名合并
+            "asset_id": f"{chain}:{addr}",
+        })
+    return (exact + prefix + partial)[:limit]
 
 
 def resolve(query: str) -> dict | None:

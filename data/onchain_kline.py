@@ -375,6 +375,19 @@ def _fetch_gecko(address: str, interval: str, limit: int,
 def _fetch_coingecko(address: str, interval: str, limit: int,
                      before_ts: Optional[float],
                      deadline: Optional[_Deadline] = None) -> List[Bar]:
+    """CoinGecko 备源：仅提供**日线**粒度 OHLC，无成交量。
+
+    重要修复：旧实现把所有周期都按 "1d" 解析后直接返回，却在 UI 上按请求的
+    1h/15m 等周期打标签——这是把日线伪装成小时线的数据造假。现在：
+      - 只有 1d/3d/1w/1M（日及以上）才使用该备源，并正确聚合；
+      - 分钟 / 小时周期直接返回空并说明原因，交由上层给出明确空状态，
+        绝不用日线数据冒充低周期 K 线。
+    """
+    if interval not in ("1d", "3d", "1w", "1M"):
+        # 诚实拒绝：CoinGecko 无分钟/小时级 OHLC
+        raise MarketApiError(
+            f"CoinGecko 仅提供日线粒度，无法提供 {interval}；"
+            f"该周期需要 GeckoTerminal 等真实分钟/小时数据源")
     dl = deadline or _Deadline(_TOTAL_BUDGET)
     if not dl.ok():
         raise MarketApiError("取数时间预算耗尽")

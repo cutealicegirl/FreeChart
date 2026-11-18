@@ -2154,7 +2154,40 @@
     });
   }
 
+  // 把日线 K 聚合为 3d/1w/1M（与桌面 onchain_kline._aggregate 同口径）。
+  // 仅在 CoinGecko 日线备源使用；OHLC=首开/高低/末收，成交量求和。
+  function ocAggregateDaily(bars, interval, sym) {
+    if (['3d', '1w', '1M'].indexOf(interval) < 0) return bars;
+    var groups = {}, order = [];
+    for (var i = 0; i < bars.length; i++) {
+      var b = bars[i];
+      var start = klineBucketStart(b.ts, interval, sym || 'ONCHAIN:agg');
+      if (!(start in groups)) {
+        groups[start] = { o: b.open, h: b.high, l: b.low, c: b.close, v: b.volume };
+        order.push(start);
+      } else {
+        var g = groups[start];
+        if (b.high > g.h) g.h = b.high;
+        if (b.low < g.l) g.l = b.low;
+        g.c = b.close;
+        g.v += b.volume;
+      }
+    }
+    var out = [];
+    for (var j = 0; j < order.length; j++) {
+      var t = order[j], x = groups[t];
+      out.push({ ts: t, time_label: klineLabel(t, interval, sym || 'ONCHAIN:agg'),
+        open: x.o, high: x.h, low: x.l, close: x.c, volume: x.v,
+        volume_reliable: false });
+    }
+    return out;
+  }
+
   function ocFetchCoingecko(addr, interval) {
+    // CoinGecko 仅提供日线 OHLC：低周期不得用日线冒充，诚实拒绝。
+    if (['1d', '3d', '1w', '1M'].indexOf(interval) < 0) {
+      return Promise.reject(new Error('CoinGecko 仅提供日线，无法提供 ' + interval));
+    }
     var chain = isSolanaAddr(addr) ? 'solana' : (addr.charAt(0) === 'T' ? 'tron' : 'ethereum');
     var url = CG_OHLC.replace('{p}', chain).replace('{a}', encodeURIComponent(addr)) +
       '?vs_currency=usd&days=365';
@@ -2164,7 +2197,7 @@
       var six = (rows || []).map(function (r) {
         return [r[0], r[1], r[2], r[3], r[4], 0];
       });
-      return ocNormalize(six, '1d');
+      return ocAggregateDaily(ocNormalize(six, '1d'), interval, addr);
     });
   }
 
