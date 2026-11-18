@@ -1585,9 +1585,14 @@ class CandleChart(QWidget):
         vr = g.get("vol")
         if vr is not None:
             vstride = max(1, len(bars) // 1600)
-            max_vol = max((c.volume for c in bars), default=0.0) or 1.0
+            # 备源（CoinGecko 等）没有真实成交量：volume_reliable=False，
+            # 绝不画量柱，也不让 0 成交量参与刻度缩放，避免误导。
+            vol_bars = [c for c in bars if getattr(c, "volume_reliable", True)]
+            max_vol = max((c.volume for c in vol_bars), default=0.0) or 1.0
             for i in range(0, len(bars), vstride):
                 c = bars[i]
+                if not getattr(c, "volume_reliable", True):
+                    continue
                 color = QColor(C_UP if c.close >= c.open else C_DOWN)
                 x = g["bar_x0"] + step * (i + 0.5)
                 vh = vr.height() * 0.88 * c.volume / max_vol
@@ -1596,10 +1601,12 @@ class CandleChart(QWidget):
                 painter.drawRect(QRectF(x - body_w / 2,
                                         vr.bottom() - vh, body_w, vh))
             # 成交量刻度放在副图底部：放顶部会和最下面的价格轴标签撞在一起
+            vol_label = (self._short_vol(max_vol) if vol_bars
+                         else "该数据源无成交量")
             self._text(painter, view_x + 6, vr.bottom() - self._axis_px(9) - 4,
                        self._margin_r - 8, self._axis_px(9) + 4,
-                       self._short_vol(max_vol), C_TEXT_DIM,
-                       self._axis_px(9), numeric=True)
+                       vol_label, C_TEXT_DIM,
+                       self._axis_px(9), numeric=bool(vol_bars))
 
         # ---- MA / EMA 均线（天数、启用状态由指标参数面板控制）----
         if not heavy:
@@ -3404,6 +3411,14 @@ class ChartView(QWidget):
                 self.chart.set_history_exhausted(True, trusted=False)
                 self.chart.trust_extremes()
             else:
+                # 链上池迁移保护：迁移前后的两段真实走势可能不连续，
+                # 把它们接成一条「连续」K 线等于伪造历史。明确断开。
+                if not klines.onchain_pools_compatible(
+                        self.chart.candles, older):
+                    self.chart.set_status(
+                        "交易池已迁移：新旧历史不连续，已停止拼接旧数据")
+                    self.chart.set_history_exhausted(True, trusted=False)
+                    return
                 merged = sorted(older + self.chart.candles,
                                 key=lambda c: c.ts)
                 self.chart.set_data(merged)

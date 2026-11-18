@@ -86,8 +86,9 @@ ok("JS 拒绝 CoinGecko 低周期",
    "CoinGecko 仅提供日线" in js)
 ok("JS 有日线聚合函数", "function ocAggregateDaily" in js)
 ok("JS 聚合用市场时区桶", "klineBucketStart(b.ts, interval" in js)
-ok("JS 备源调用聚合",
-   "return ocAggregateDaily(ocNormalize(six, '1d'), interval" in js)
+ok("JS 备源调用聚合（成交量可靠性透传）",
+   "return ocAggregateDaily(ocNormalize(six, '1d'," in js
+   and "volume_reliable: false" in js)
 
 print("\n" + "=" * 62)
 print(f"结果: {PASS} 通过 / {FAIL} 失败")

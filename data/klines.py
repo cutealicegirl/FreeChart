@@ -91,6 +91,18 @@ class Candle:
     preview: bool = False
     quote_ts: float = 0.0
     source: str = ""
+    volume_reliable: bool = True   # False = 数据源无真实成交量，不画量柱
+    pool: str = ""                 # 链上来源交易池；跨池禁止无缝拼接
+
+
+def onchain_pools_compatible(old_candles, new_candles) -> bool:
+    """判断两批 K 线能否安全拼接（桌面图表回溯页使用）。
+
+    链上池迁移后，新旧两段走势的真实价格可能不连续；把它们接成一条
+    「连续」K 线属于伪造历史。只有双方都带明确池且不同才拒绝，旧缓存
+    无池信息时不误伤。非链上标的 pool 恒为空，天然不受影响。
+    """
+    return _ock.pools_compatible(old_candles, new_candles)
 
 
 # ============ 公司行为复权集成 ============
@@ -293,7 +305,8 @@ def _fetch_onchain(symbol: str, interval: str) -> List[Candle]:
     bars = _ock.fetch_ohlcv(symbol, interval, _LIMIT, allow_empty=False)
     return [Candle(ts=b.ts, time_label=b.time_label, open=b.open,
                    high=b.high, low=b.low, close=b.close,
-                   volume=b.volume) for b in bars]
+                   volume=b.volume, volume_reliable=b.volume_reliable,
+                   pool=b.pool) for b in bars]
 
 
 # ================= 加密货币（Binance） =================
@@ -606,7 +619,8 @@ def fetch_klines_before(symbol: str, interval: str, before_ts: float,
                                 before_ts=before_ts, allow_empty=True)
         candles = [Candle(ts=b.ts, time_label=b.time_label, open=b.open,
                           high=b.high, low=b.low, close=b.close,
-                          volume=b.volume) for b in bars
+                          volume=b.volume, volume_reliable=b.volume_reliable,
+                          pool=b.pool) for b in bars
                    if b.ts < before_ts]
         return candles, not candles
     if symbol.startswith("US:"):

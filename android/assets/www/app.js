@@ -2354,8 +2354,8 @@
   function ocCacheKey(sym, iv) { return sym + '|' + iv; }
 
   // 标准化：[ts,o,h,l,c,v] → candle；自动识别秒/毫秒、校验 OHLC、去重排序
-  function ocNormalize(rows, interval) {
-    var out = [];
+  function ocNormalize(rows, interval, opts) {
+    var ex = opts || {}, out = [];
     for (var i = 0; i < (rows || []).length; i++) {
       var r = rows[i];
       if (!Array.isArray(r) || r.length < 5) continue;
@@ -2368,7 +2368,7 @@
       if (KLINE_SEC[interval]) {
         ts = klineBucketStart(ts, interval, 'ONCHAIN:UTC');
       }
-      out.push(candle(ts, o, h, l, c, v, interval, 'ONCHAIN:UTC'));
+      out.push(candle(ts, o, h, l, c, v, interval, 'ONCHAIN:UTC', ex));
     }
     out.sort(function (a, b) { return a.ts - b.ts; });
     var seen = {}, uniq = [];
@@ -2391,10 +2391,23 @@
         var rows = (d && d.data) || [];
         for (var i = 0; i < rows.length; i++) {
           var id = String(rows[i].id || ''), at = rows[i].attributes || {};
-          var liq = Number(at.reserve_in_usd || 0), k = id.indexOf('_');
+          var k = id.indexOf('_');
           if (k <= 0) continue;
-          if (!best || liq > best.liq) {
-            best = { net: id.slice(0, k), pool: id.slice(k + 1), liq: liq, ts: nowMs() };
+          var liq = Number(at.reserve_in_usd || 0);
+          var vol = Number(((at.volume_usd || {}).h24) || 0);
+          var txn = at.txns && at.txns.h24 || {};
+          var trades = Number(txn.buys || 0) + Number(txn.sells || 0);
+          // 与桌面 _pick_pool_from_payload 同口径：流动性+成交量+活跃度综合，
+          // 零成交的死池重罚，避免搜索能中、历史却取不到。
+          var score = Math.log1p(Math.max(liq, 0)) +
+            0.8 * Math.log1p(Math.max(vol, 0)) +
+            0.6 * Math.log1p(Math.max(trades, 0));
+          if (liq <= 0) score -= 20;
+          if (vol <= 0) score -= 6;
+          if (trades <= 0) score -= 6;
+          if (!best || score > best.score) {
+            best = { net: id.slice(0, k), pool: id.slice(k + 1),
+              liq: liq, score: score, ts: nowMs() };
           }
         }
         if (best) { OC_POOL_CACHE[addr] = best; writeJSON('ct_oc_pools', OC_POOL_CACHE); }
@@ -2412,7 +2425,8 @@
       return http(url).then(function (txt) {
         var d = JSON.parse(txt);
         var attrs = (d && d.data && d.data.attributes) || {};
-        return ocNormalize(attrs.ohlcv_list || [], interval);
+        return ocNormalize(attrs.ohlcv_list || [], interval,
+          { pool: pool.net + '_' + pool.pool });
       });
     });
   }
@@ -2441,7 +2455,7 @@
       var t = order[j], x = groups[t];
       out.push({ ts: t, time_label: klineLabel(t, interval, sym || 'ONCHAIN:agg'),
         open: x.o, high: x.h, low: x.l, close: x.c, volume: x.v,
-        volume_reliable: false });
+        volume_reliable: false, pool: '' });
     }
     return out;
   }
@@ -2460,7 +2474,8 @@
       var six = (rows || []).map(function (r) {
         return [r[0], r[1], r[2], r[3], r[4], 0];
       });
-      return ocAggregateDaily(ocNormalize(six, '1d'), interval, addr);
+      return ocAggregateDaily(ocNormalize(six, '1d', { volume_reliable: false }),
+        interval, addr);
     });
   }
 
@@ -2477,15 +2492,27 @@
       return ocFetchCoingecko(addr, interval);
     }).then(function (bars) {
       if (!bars || !bars.length) throw new Error('数据源未返回历史数据');
+      // 跨池保护：迁移前后两段走势可能不连续，禁止无缝拼接制造假历史。
+      // 双方都有明确池身份且不同 -> 以新池为准，丢弃旧缓存。
+      var oldPool = '', newPool = '', q;
+      for (q = 0; q < (cached && cached.bars || []).length; q++) {
+        if (cached.bars[q].pool) { oldPool = cached.bars[q].pool; break; }
+      }
+      for (q = 0; q < bars.length; q++) {
+        if (bars[q].pool) { newPool = bars[q].pool; break; }
+      }
+      var crossPool = !!(oldPool && newPool && oldPool !== newPool);
+      var base = crossPool ? [] : (cached && cached.bars || []);
       // 增量合并：与本地缓存按 ts 去重（保留最新真实值）
-      var merged = {}, all = (cached && cached.bars || []).concat(bars);
+      var merged = {}, all = base.concat(bars);
       for (var i = 0; i < all.length; i++) merged[all[i].ts] = all[i];
       var final = Object.keys(merged).map(function (k) { return merged[k]; })
         .sort(function (a, b) { return a.ts - b.ts; });
       if (final.length > 10000) final = final.slice(final.length - 10000);
       OC_KLINE_CACHE[key] = { bars: final, source: 'DEX OHLCV', ts: nowMs() };
       writeJSON('ct_oc_kline', OC_KLINE_CACHE);
-      OC_STATUS[sym] = { state: 'ok', source: 'DEX OHLCV', ts: nowMs() };
+      OC_STATUS[sym] = { state: 'ok', source: 'DEX OHLCV', ts: nowMs(),
+        message: crossPool ? '交易池已迁移：已按新池重建历史，未拼接旧池数据' : '' };
       return final;
     });
   }
@@ -2507,8 +2534,11 @@
     // 与桌面 core.kline_time.label_for 同源；不再用设备本地时间
     return klineLabel(ts, interval, sym || CHART_SYMBOL || 'crypto');
   }
-  function candle(ts, o, h, l, c, v, interval, sym) {
-    return { ts: ts, label: labelFor(ts, interval, sym), o: o, h: h, l: l, c: c, v: v };
+  function candle(ts, o, h, l, c, v, interval, sym, opts) {
+    var ex = opts || {};
+    return { ts: ts, label: labelFor(ts, interval, sym), o: o, h: h, l: l, c: c, v: v,
+      volume_reliable: ex.volume_reliable !== false,   // 备源无真实量则不画量柱
+      pool: ex.pool || '' };                            // 跨池历史不可无缝拼接
   }
   function aggregate(rows, mode, interval, sym) {
     if (!rows.length) return [];
@@ -3218,16 +3248,25 @@
     // 成交量副图
     var volTop = padT + plotH + 6;
     if (showVol) {
+      // 备源（CoinGecko）无真实成交量：volume_reliable=false 的柱子不画，
+      // 也不参与 vmax，避免用 0 量或伪量误导（与桌面端同口径）。
+      var volSeen = false, vvmax = 0;
       for (i = 0; i < view.length; i++) {
-        if (!view[i]) continue;
+        if (!view[i] || view[i].volume_reliable === false) continue;
+        volSeen = true;
+        vvmax = Math.max(vvmax, view[i].v);
+      }
+      for (i = 0; i < view.length; i++) {
+        if (!view[i] || view[i].volume_reliable === false) continue;
         var vr = view[i];
         g.fillStyle = vr.c >= vr.o ? UP : DOWN; g.globalAlpha = 0.45;
-        var vh = vmax ? (vr.v / vmax) * (volH - 8) : 0;
+        var vh = vvmax ? (vr.v / vvmax) * (volH - 8) : 0;
         g.fillRect(X(i) - bw * 0.3, volTop + (volH - 8 - vh), bw * 0.6, vh);
         g.globalAlpha = 1;
       }
       g.fillStyle = colSub; g.textAlign = 'left';
-      g.fillText('VOL ' + fmtAmount(vmax), 2, volTop + fpx);
+      g.fillText(volSeen ? ('VOL ' + fmtAmount(vvmax)) : '该数据源无成交量',
+        2, volTop + fpx);
     }
 
     // MACD 副图：柱 + DIF / DEA 两条线

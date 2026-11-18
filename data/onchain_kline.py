@@ -115,6 +115,27 @@ class Bar:
     close: float
     volume: float
     volume_reliable: bool = True   # CoinGecko 备源无成交量时为 False
+    pool: str = ""                 # 来源交易池 ID：跨池不可无缝拼接
+
+
+def pool_of(bars) -> str:
+    """取一批 K 线的交易池身份；空串表示来源未知（旧缓存）。"""
+    for b in bars or []:
+        p = getattr(b, "pool", "") or ""
+        if p:
+            return p
+    return ""
+
+
+def pools_compatible(a, b) -> bool:
+    """两批 K 线能否安全拼接。
+
+    只有**双方都有明确池身份且不同**时才判不兼容。旧缓存可能尚未记录池，
+    此时不误伤；但新数据一旦给出不同池，必须拒绝衔接，因为把迁移前后的
+    两段走势接成一条连续 K 线是数据造假。
+    """
+    pa, pb = pool_of(a), pool_of(b)
+    return not (pa and pb and pa != pb)
 
 
 # ---------------- 状态上报 ----------------
@@ -172,24 +193,45 @@ def invalidate_pool(address_or_symbol: str):
 
 
 def _pick_pool_from_payload(payload: dict) -> Optional[dict]:
-    """从 GeckoTerminal 搜索结果里挑流动性最高的池，返回 network/pool。"""
+    """按流动性 / 24h 成交量 / 活跃度 / 数据完整性综合挑选交易池。
+
+    旧实现只看 reserve_in_usd，会把「TVL 高但 24h 零成交」的死池选成主池，
+    结果就是搜索能命中、历史却取不到或极稀疏。现在四个维度共同评分；
+    各项真实指标一并返回，供状态诊断使用，不伪造缺失值。
+    """
     rows = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         return None
+    import math
     best = None
     for row in rows:
         try:
             attrs = row.get("attributes") or {}
             liq = float(attrs.get("reserve_in_usd") or 0)
+            vol = float((attrs.get("volume_usd") or {}).get("h24") or 0)
+            tx = (attrs.get("txns") or {}).get("h24") or {}
+            trades = float(tx.get("buys") or 0) + float(tx.get("sells") or 0)
             pid = str(row.get("id") or "")       # 形如 solana_0x...
             if "_" not in pid:
                 continue
             net, pool = pid.split("_", 1)
             if not net or not pool:
                 continue
-            if best is None or liq > best["liq"]:
-                best = {"network": net, "pool": pool, "liq": liq,
-                        "name": attrs.get("name") or ""}
+            # 对数评分：避免单个巨鲸池碾压；零成交 / 零流动性直接重罚
+            score = (math.log1p(max(liq, 0.0))
+                     + 0.8 * math.log1p(max(vol, 0.0))
+                     + 0.6 * math.log1p(max(trades, 0.0)))
+            if liq <= 0:
+                score -= 20
+            if vol <= 0:
+                score -= 6
+            if trades <= 0:
+                score -= 6
+            cand = {"network": net, "pool": pool, "liq": liq,
+                    "volume_24h": vol, "trades_24h": trades,
+                    "score": score, "name": attrs.get("name") or ""}
+            if best is None or score > best["score"]:
+                best = cand
         except (TypeError, ValueError, AttributeError):
             continue
     return best
@@ -212,6 +254,10 @@ def _resolve_pool(address: str, allow_cached: bool = True,
             resp = HTTP.get(_GT_SEARCH, params={"query": address, "page": 1},
                             timeout=min(_RESOLVE_TIMEOUT, dl.timeout()),
                             headers={"Accept": "application/json; version=20230302"})
+            if resp.status_code == 429:
+                # 限流必须向上冒泡，不能被误报成「未找到交易池」：
+                # 上层据此区分 rate_limited 与 no_pool 两种完全不同的状态。
+                raise MarketApiError("DEX 数据源限流 (HTTP 429)")
             if resp.status_code == 200:
                 found = _pick_pool_from_payload(resp.json() or {})
                 if found:
@@ -219,6 +265,8 @@ def _resolve_pool(address: str, allow_cached: bool = True,
                     cache[address] = found
                     _save_pool_cache(cache)
                     return found
+        except MarketApiError:
+            raise
         except Exception:                        # noqa: BLE001 - 多源容错
             pass
 
@@ -232,6 +280,8 @@ def _resolve_pool(address: str, allow_cached: bool = True,
                             params={"page": 1},
                             timeout=min(_RESOLVE_TIMEOUT, dl.timeout()),
                             headers={"Accept": "application/json; version=20230302"})
+            if resp.status_code == 429:
+                raise MarketApiError("DEX 数据源限流 (HTTP 429)")
             if resp.status_code != 200:
                 continue
             found = _pick_pool_from_payload(resp.json() or {})
@@ -240,6 +290,8 @@ def _resolve_pool(address: str, allow_cached: bool = True,
                 cache[address] = found
                 _save_pool_cache(cache)
                 return found
+        except MarketApiError:
+            raise
         except Exception:                        # noqa: BLE001
             pass
     return None
@@ -253,13 +305,15 @@ def _fmt_label(ts: float, interval: str) -> str:
 
 def normalize(rows: list, interval: str,
               volume_reliable: bool = True,
-              market: str = "crypto") -> List[Bar]:
+              market: str = "crypto",
+              pool: str = "") -> List[Bar]:
     """把 [ts, o, h, l, c, v] 原始行标准化为真实 K 线列表。
 
     - ts 自动识别秒/毫秒/微秒并统一为秒
     - 校验 high>=max(o,c)、low<=min(o,c)、价格>0、成交量>=0
     - 按时间正序，同时间戳去重（保留最后一条）
     - 非法行整条丢弃，不修补、不插值
+    - pool 记录来源交易池；跨池数据禁止无缝拼接（见 pools_compatible）
     """
     out = []
     for r in rows:
@@ -299,7 +353,7 @@ def normalize(rows: list, interval: str,
         dedup[x["ts"]] = x
     return [Bar(ts=x["ts"], time_label=_fmt_label(x["ts"], interval),
                 open=x["o"], high=x["h"], low=x["l"], close=x["c"],
-                volume=x["v"], volume_reliable=volume_reliable)
+                volume=x["v"], volume_reliable=volume_reliable, pool=pool)
             for x in (dedup[t] for t in sorted(dedup))]
 
 
@@ -316,19 +370,20 @@ def _aggregate(bars: List[Bar], interval: str) -> List[Bar]:
     for b in bars:
         key = _kt.bucket_start(b.ts, interval, "ONCHAIN:UTC")
         g = groups.setdefault(key, {"ts": key, "o": b.open, "h": b.high,
-                                    "l": b.low, "c": b.close, "v": b.volume,
+                                    "l": b.low, "c": b.close, "v": 0.0,
                                     "vr": b.volume_reliable})
         g["h"] = max(g["h"], b.high)
         g["l"] = min(g["l"], b.low)
         g["c"] = b.close
-        g["v"] += b.volume
+        g["v"] += b.volume    # 从 0 起累加；旧实现多算一次首根，量能虚高
         g["vr"] = g["vr"] and b.volume_reliable
     out = []
     for key in sorted(groups):
         g = groups[key]
         out.append(Bar(ts=key, time_label=_fmt_label(key, interval),
                        open=g["o"], high=g["h"], low=g["l"], close=g["c"],
-                       volume=g["v"], volume_reliable=g["vr"]))
+                       volume=g["v"], volume_reliable=g["vr"],
+                       pool=pool_of(bars)))
     return out
 
 
@@ -362,7 +417,9 @@ def _fetch_gecko(address: str, interval: str, limit: int,
     attrs = ((payload.get("data") or {}).get("attributes")
              if isinstance(payload, dict) else None) or {}
     rows = attrs.get("ohlcv_list") or []
-    bars = normalize(rows, interval, volume_reliable=True)
+    # 记录来源池身份：回溯分页一旦跨池，上层必须断开而不是无缝拼接。
+    pool_id = f"{pool['network']}_{pool['pool']}"
+    bars = normalize(rows, interval, volume_reliable=True, pool=pool_id)
     # 池迁移：曾解析到池但完全无历史 → 强制重解析一次再试（仅在预算允许时）
     if not bars and resolve_attempt == 0 and before_ts is None and dl.ok():
         invalidate_pool(address)
@@ -443,7 +500,8 @@ def fetch_ohlcv(symbol: str, interval: str, limit: int = _LIMIT,
             errors.append(f"{name}: {e}")
             continue
         if bars:
-            _set_status(symbol, "ok", name, len(bars))
+            _set_status(symbol, "ok", name, len(bars),
+                        f"pool={pool_of(bars)}")
             return bars
         errors.append(f"{name}: 无历史数据")
     # 全部数据源都没给数据：诚实上报，绝不编造

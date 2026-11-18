@@ -84,6 +84,7 @@ def _conn() -> sqlite3.Connection:
             symbol TEXT NOT NULL, interval TEXT NOT NULL, ts REAL NOT NULL,
             open REAL, high REAL, low REAL, close REAL, volume REAL,
             label TEXT,
+            pool TEXT DEFAULT '', vr INTEGER DEFAULT 1,
             PRIMARY KEY (symbol, interval, ts))""")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS meta (
@@ -99,6 +100,13 @@ def _conn() -> sqlite3.Connection:
             conn.execute(f"ALTER TABLE meta ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError:
             pass  # 列已存在
+    # 链上来源身份 / 成交量可靠性：旧库补列即可，旧行用默认值，不需要全量重抓
+    for col, decl in (("pool", "TEXT DEFAULT ''"),
+                      ("vr", "INTEGER DEFAULT 1")):
+        try:
+            conn.execute(f"ALTER TABLE candles ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     _local.conn = conn
     return conn
@@ -194,22 +202,27 @@ def count(symbol: str, interval: str) -> int:
 def load(symbol: str, interval: str) -> list:
     """读取该品种/周期的全部已缓存 K 线（按时间升序）。"""
     rows = _conn().execute(
-        "SELECT ts, label, open, high, low, close, volume FROM candles "
-        "WHERE symbol=? AND interval=? ORDER BY ts",
+        "SELECT ts, label, open, high, low, close, volume, pool, vr "
+        "FROM candles WHERE symbol=? AND interval=? ORDER BY ts",
         (_ns(symbol), interval)).fetchall()
     return [Candle(ts=r[0], time_label=r[1] or "", open=r[2], high=r[3],
-                   low=r[4], close=r[5], volume=r[6]) for r in rows]
+                   low=r[4], close=r[5], volume=r[6],
+                   pool=r[7] or "", volume_reliable=bool(r[8])
+                   if r[8] is not None else True) for r in rows]
 
 
 def take_before(symbol: str, interval: str, before_ts: float,
                 limit: int = 1000) -> list:
     """从本地取出更早的一页；够用就完全不用请求 API。"""
     rows = _conn().execute(
-        "SELECT ts, label, open, high, low, close, volume FROM candles "
-        "WHERE symbol=? AND interval=? AND ts<? ORDER BY ts DESC LIMIT ?",
+        "SELECT ts, label, open, high, low, close, volume, pool, vr "
+        "FROM candles WHERE symbol=? AND interval=? AND ts<? "
+        "ORDER BY ts DESC LIMIT ?",
         (_ns(symbol), interval, before_ts, limit)).fetchall()
     return [Candle(ts=r[0], time_label=r[1] or "", open=r[2], high=r[3],
-                   low=r[4], close=r[5], volume=r[6])
+                   low=r[4], close=r[5], volume=r[6],
+                   pool=r[7] or "", volume_reliable=bool(r[8])
+                   if r[8] is not None else True)
             for r in reversed(rows)]
 
 
@@ -231,10 +244,11 @@ def save(symbol: str, interval: str, candles: list,
     if real:
         conn.executemany(
             "INSERT OR REPLACE INTO candles "
-            "(symbol,interval,ts,open,high,low,close,volume,label) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "(symbol,interval,ts,open,high,low,close,volume,label,pool,vr) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [(key, interval, c.ts, c.open, c.high, c.low, c.close,
-              c.volume, c.time_label) for c in real])
+              c.volume, c.time_label, getattr(c, "pool", "") or "",
+              1 if getattr(c, "volume_reliable", True) else 0) for c in real])
 
     ex, updated, schema, old_tag, checked = _meta(symbol, interval)
     if exhausted is not None:
