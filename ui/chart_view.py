@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
 
 from core import indicator_params, kline_time as _kt, onchain_history
 from core.thread_cleanup import safe_stop_thread
-from data import kline_cache, onchain, onchain_kline
+from data import kline_cache, klines, onchain, onchain_kline
 from data.klines import (Candle, HistoryWorker, KlineWorker,
                          default_interval, intervals_for, refresh_seconds)
 from ui.theme import (C_ACCENT, C_BG_BASE, C_BG_HOVER, C_BG_PANEL,
@@ -2056,6 +2056,15 @@ class ChartView(QWidget):
         super().__init__(parent)
         self.setStyleSheet(f"background:{C_BG_BASE};")
         self._cfg = config
+        # 从配置恢复历史价格口径，并让 klines 与 cache 同步（缓存键隔离）
+        try:
+            from core import adjust_mode as _am
+            _mode = _am.normalize(
+                config.get("adjust_mode")) if config else _am.DEFAULT_MODE
+            _m2 = klines.set_adjust_mode(_mode)
+            kline_cache.set_adjust_mode(_m2)
+        except Exception:
+            pass
         self._symbol = ""
         self._interval = ""
         self._worker: KlineWorker | None = None
@@ -2280,6 +2289,19 @@ class ChartView(QWidget):
         btn_history.setStyleSheet(tool_qss(C_ACCENT))
         btn_history.clicked.connect(self._show_all_history)
         row2.addWidget(btn_history)
+        # 历史价格口径切换：raw / 拆股复权 / 总回报复权（含分红）。
+        # 三种口径缓存物理隔离，切换即重新抓取，杜绝串味。
+        from core import adjust_mode as _am
+        self.btn_adjust_mode = QPushButton(
+            _am.label(klines.get_adjust_mode()))
+        self.btn_adjust_mode.setCursor(Qt.PointingHandCursor)
+        self.btn_adjust_mode.setFocusPolicy(Qt.NoFocus)
+        self.btn_adjust_mode.setToolTip(
+            "切换历史价格口径：原始价 / 拆股复权 / 总回报复权（含分红）。"
+            "切换后重新加载并使用独立缓存")
+        self.btn_adjust_mode.setStyleSheet(tool_qss(C_ACCENT))
+        self.btn_adjust_mode.clicked.connect(self._cycle_adjust_mode)
+        row2.addWidget(self.btn_adjust_mode)
 
         row2.addStretch(1)
         hint = QLabel("滚轮缩放(可缩到全部历史) · 左键拖动整图平移"
@@ -2772,6 +2794,29 @@ class ChartView(QWidget):
             self._cfg.save()
         except (AttributeError, OSError, TypeError):
             pass
+
+    def _cycle_adjust_mode(self):
+        """循环切换历史价格口径，并让 klines / cache / 配置保持一致。"""
+        from core import adjust_mode as _am
+        cur = klines.get_adjust_mode()
+        modes = list(_am.ALL_MODES)
+        idx = modes.index(cur) if cur in modes else 0
+        nxt = modes[(idx + 1) % len(modes)]
+        klines.set_adjust_mode(nxt)
+        kline_cache.set_adjust_mode(nxt)
+        if self._cfg is not None:
+            try:
+                self._cfg.set("adjust_mode", nxt)
+                self._cfg.save()
+            except (AttributeError, OSError, TypeError):
+                pass
+        self.btn_adjust_mode.setText(_am.label(nxt))
+        self.chart.set_status(f"已切换为「{_am.label(nxt)}」，正在重新加载…")
+        # 清掉预览与旧请求，强制走新口径重新抓取（独立缓存不会串味）
+        self._load_seq += 1
+        self.chart.clear_preview()
+        self.chart.set_data([])
+        self._load()
 
     def _on_reset_view(self):
         """用户主动点「最新」才复位，并同步更新记住的视口。"""

@@ -37,7 +37,7 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-from data.corporate_actions import ActionType, CorporateAction
+from data.corporate_actions import ActionType, CorporateAction, SHARE_CHANGE_TYPES
 
 RAW = "raw"
 FORWARD = "forward"
@@ -78,15 +78,49 @@ def forward_factors_for_date(date_str: str,
 
 def backward_factors_for_date(date_str: str,
                               actions: Sequence[CorporateAction]) -> Tuple[float, float]:
-    """后复权：对除权日**及之后**（ex_date <= bar_date）的事件累乘。"""
+    """后复权：对除权日**及之后**（ex_date <= bar_date）的事件累乘。
+
+    价格因子严格取 ``1 / price_factor``：
+      - 拆股 ratio=4 -> 价格 ×4（早期价不动，后期价放大）；
+      - 现金分红 (prev-cash)/prev -> 价格 ×prev/(prev-cash)（总回报口径）。
+
+    旧实现把 ``volume_factor`` 当价格乘数，导致现金分红（volume_factor=1）
+    在后复权中完全失效——这是 Total-Return 口径缺失的根因，已修正。
+    成交量因子仍取 1/volume_factor（份额变化才调量，分红不影响量）。
+    """
     if not date_str:
         return 1.0, 1.0
     pf, vf = 1.0, 1.0
     for a in _usable(actions):
         if a.ex_date <= date_str:
-            pf *= a.volume_factor   # 后复权价乘 ratio
-            vf *= 1.0 / a.volume_factor if a.volume_factor else 1.0
+            price_f = a.price_factor
+            if price_f and price_f > 0:
+                pf *= 1.0 / price_f
+            vol_f = a.volume_factor
+            if vol_f and vol_f > 0:
+                vf *= 1.0 / vol_f
     return pf, vf
+
+
+def factors_for_mode(mode: str, date_str: str,
+                     actions: Sequence[CorporateAction]) -> Tuple[float, float]:
+    """按历史价格口径返回 (价格乘数, 成交量乘数)。
+
+    mode 来自 core.adjust_mode：
+      raw              -> (1,1)，不做任何复权；
+      split_adjusted   -> 只用份额变动事件的前复权因子（排除现金分红）；
+      total_return     -> 全部可用事件（含现金分红）的后复权因子。
+    """
+    from core import adjust_mode as _am
+    m = _am.normalize(mode)
+    if m == _am.RAW:
+        return 1.0, 1.0
+    if m == _am.SPLIT_ADJUSTED:
+        share_only = [a for a in actions
+                      if getattr(a.kind, "value", a.kind) in
+                      {t.value for t in SHARE_CHANGE_TYPES}]
+        return forward_factors_for_date(date_str, share_only)
+    return backward_factors_for_date(date_str, actions)
 
 
 def apply_adjustment(candles: list, actions: Sequence[CorporateAction],
@@ -97,7 +131,8 @@ def apply_adjustment(candles: list, actions: Sequence[CorporateAction],
     - candles: 具有 ts/open/high/low/close/volume 的对象（klines.Candle）。
     - actions: 该标的的公司行为列表（registry.actions_for(symbol)）。
     - basis:   输入数据的当前口径；非 raw 时拒绝复权（幂等保护）。
-    - mode:    目标口径 forward(qfq) 或 backward(hfq)。
+    - mode:    目标口径。兼容旧值 forward/backward/qfq/hfq；同时接受
+               core.adjust_mode 的 raw/split_adjusted/total_return。
     - ts_to_date: 可选 (ts)->'YYYY-MM-DD'，测试可注入。
 
     返回新 Candle 列表（同一类型，用 dataclasses.replace 保留全部字段）。
@@ -106,7 +141,8 @@ def apply_adjustment(candles: list, actions: Sequence[CorporateAction],
 
     if basis not in _VALID_IN_BASIS:
         raise ValueError(f"未知数据口径: {basis}")
-    if mode not in (FORWARD, BACKWARD, QFQ, HFQ):
+    if mode not in (FORWARD, BACKWARD, QFQ, HFQ, "raw",
+                    "split_adjusted", "total_return"):
         raise ValueError(f"未知复权目标: {mode}")
 
     # 幂等：已是复权口径 -> 原样返回，绝不二次复权
@@ -118,8 +154,24 @@ def apply_adjustment(candles: list, actions: Sequence[CorporateAction],
         return list(candles)   # 无可安全使用的事件：保持原始
 
     to_date = ts_to_date or _date_of_ts
-    factor_fn = (forward_factors_for_date if mode in (FORWARD, QFQ)
-                 else backward_factors_for_date)
+    # 兼容映射：旧别名 forward/qfq = 全口径前复权（含分红），
+    # backward/hfq = 全口径后复权；新口径 split_adjusted / total_return
+    # 由 core.adjust_mode 显式给出，互不混淆。
+    _legacy = {
+        FORWARD: forward_factors_for_date, QFQ: forward_factors_for_date,
+        BACKWARD: backward_factors_for_date, HFQ: backward_factors_for_date,
+        "split_adjusted": lambda d, acts: forward_factors_for_date(
+            d, [a for a in acts
+                if getattr(a.kind, "value", a.kind) in
+                {t.value for t in SHARE_CHANGE_TYPES}]),
+        "total_return": backward_factors_for_date,
+    }
+    fn = _legacy.get(mode)
+    if fn is None and mode == "raw":
+        return list(candles)
+    if fn is None:
+        raise ValueError(f"未知复权目标: {mode}")
+    factor_fn = fn
 
     out = []
     for c in candles:

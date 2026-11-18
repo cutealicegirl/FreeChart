@@ -24,9 +24,29 @@ _DB_NAME = "klines.sqlite3"
 _FRESH_SECONDS = 900          # 同一周期内最长 15 分钟复核一次（边界优先）
 # 单一时钟入口，测试可注入固定时间驱动跨日/跨月边界
 _now = time.time
-# v4 = 加入周期边界新鲜度（checked_bucket）；旧 v3 元数据无该列，自动失效重建
-_CACHE_SCHEMA = "v4-time-sync"
+# v5 = 缓存键纳入复权口径（adjust_mode + data_version），彻底隔离 raw /
+# split_adjusted / total_return 三种口径，防止切换模式后串味。
+_CACHE_SCHEMA = "v5-adjust-mode"
 _local = threading.local()
+# 当前复权口径；由 set_adjust_mode 设置，所有 API 在入口处编入命名空间
+_adjust_mode = "split_adjusted"
+
+
+def set_adjust_mode(mode: str):
+    """设置缓存的复权口径命名空间；切换后不同口径数据物理隔离。"""
+    from core import adjust_mode as _am
+    global _adjust_mode
+    _adjust_mode = _am.normalize(mode)
+
+
+def get_adjust_mode() -> str:
+    return _adjust_mode
+
+
+def _ns(symbol: str) -> str:
+    """把当前口径编入缓存 symbol 键。"""
+    from core import adjust_mode as _am
+    return _am.cache_symbol(symbol, _adjust_mode)
 
 
 def _adjust_tag(symbol: str) -> str:
@@ -87,7 +107,7 @@ def _conn() -> sqlite3.Connection:
 def _meta(symbol: str, interval: str):
     row = _conn().execute(
         "SELECT exhausted, updated, schema, adj_tag, checked_bucket "
-        "FROM meta WHERE symbol=? AND interval=?", (symbol, interval)).fetchone()
+        "FROM meta WHERE symbol=? AND interval=?", (_ns(symbol), interval)).fetchone()
     if not row:
         return (False, 0.0, "", "", 0.0)
     return (bool(row[0]), float(row[1]),
@@ -107,7 +127,7 @@ def last_bar_ts(symbol: str, interval: str) -> float:
     """该序列最后一根真实 K 线的 ts；空序列返回 0。"""
     row = _conn().execute(
         "SELECT MAX(ts) FROM candles WHERE symbol=? AND interval=?",
-        (symbol, interval)).fetchone()
+        (_ns(symbol), interval)).fetchone()
     return float(row[0] or 0) if row else 0.0
 
 
@@ -156,7 +176,7 @@ def mark_checked(symbol: str, interval: str,
         "ON CONFLICT(symbol,interval) DO UPDATE SET "
         "updated=excluded.updated, checked_bucket=excluded.checked_bucket, "
         "schema=excluded.schema, adj_tag=excluded.adj_tag",
-        (symbol, interval, int(ex), now, _CACHE_SCHEMA,
+        (_ns(symbol), interval, int(ex), now, _CACHE_SCHEMA,
          tag or _adjust_tag(symbol), max(float(checked or 0), bucket)))
     conn.commit()
 
@@ -168,7 +188,7 @@ def is_exhausted(symbol: str, interval: str) -> bool:
 def count(symbol: str, interval: str) -> int:
     return _conn().execute(
         "SELECT COUNT(*) FROM candles WHERE symbol=? AND interval=?",
-        (symbol, interval)).fetchone()[0]
+        (_ns(symbol), interval)).fetchone()[0]
 
 
 def load(symbol: str, interval: str) -> list:
@@ -176,7 +196,7 @@ def load(symbol: str, interval: str) -> list:
     rows = _conn().execute(
         "SELECT ts, label, open, high, low, close, volume FROM candles "
         "WHERE symbol=? AND interval=? ORDER BY ts",
-        (symbol, interval)).fetchall()
+        (_ns(symbol), interval)).fetchall()
     return [Candle(ts=r[0], time_label=r[1] or "", open=r[2], high=r[3],
                    low=r[4], close=r[5], volume=r[6]) for r in rows]
 
@@ -187,7 +207,7 @@ def take_before(symbol: str, interval: str, before_ts: float,
     rows = _conn().execute(
         "SELECT ts, label, open, high, low, close, volume FROM candles "
         "WHERE symbol=? AND interval=? AND ts<? ORDER BY ts DESC LIMIT ?",
-        (symbol, interval, before_ts, limit)).fetchall()
+        (_ns(symbol), interval, before_ts, limit)).fetchall()
     return [Candle(ts=r[0], time_label=r[1] or "", open=r[2], high=r[3],
                    low=r[4], close=r[5], volume=r[6])
             for r in reversed(rows)]
@@ -205,6 +225,7 @@ def save(symbol: str, interval: str, candles: list,
     - 预览 K 线（preview=True）一律不落盘，绝不污染真实历史。
     """
     conn = _conn()
+    key = _ns(symbol)
     tag = _adjust_tag(symbol)
     real = [c for c in (candles or []) if not getattr(c, "preview", False)]
     if real:
@@ -212,7 +233,7 @@ def save(symbol: str, interval: str, candles: list,
             "INSERT OR REPLACE INTO candles "
             "(symbol,interval,ts,open,high,low,close,volume,label) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
-            [(symbol, interval, c.ts, c.open, c.high, c.low, c.close,
+            [(key, interval, c.ts, c.open, c.high, c.low, c.close,
               c.volume, c.time_label) for c in real])
 
     ex, updated, schema, old_tag, checked = _meta(symbol, interval)
@@ -233,7 +254,7 @@ def save(symbol: str, interval: str, candles: list,
         "exhausted=excluded.exhausted, updated=excluded.updated, "
         "schema=excluded.schema, adj_tag=excluded.adj_tag, "
         "checked_bucket=excluded.checked_bucket",
-        (symbol, interval, int(ex), new_updated,
+        (key, interval, int(ex), new_updated,
          _CACHE_SCHEMA, tag or old_tag, checked))
     conn.commit()
 
@@ -241,8 +262,8 @@ def save(symbol: str, interval: str, candles: list,
 def clear(symbol: str | None = None):
     conn = _conn()
     if symbol:
-        conn.execute("DELETE FROM candles WHERE symbol=?", (symbol,))
-        conn.execute("DELETE FROM meta WHERE symbol=?", (symbol,))
+        conn.execute("DELETE FROM candles WHERE symbol=?", (_ns(symbol),))
+        conn.execute("DELETE FROM meta WHERE symbol=?", (_ns(symbol),))
     else:
         conn.execute("DELETE FROM candles")
         conn.execute("DELETE FROM meta")
@@ -265,7 +286,10 @@ def prune(max_bars: int = _MAX_BARS_PER_SERIES) -> int:
     removed = 0
     keys = conn.execute("SELECT DISTINCT symbol, interval FROM candles").fetchall()
     for symbol, interval in keys:
-        total = count(symbol, interval)
+        # symbol 来自数据库，已是带命名空间的值，不能再套 _ns()
+        total = conn.execute(
+            "SELECT COUNT(*) FROM candles WHERE symbol=? AND interval=?",
+            (symbol, interval)).fetchone()[0]
         if total <= max_bars:
             continue
         cutoff = conn.execute(

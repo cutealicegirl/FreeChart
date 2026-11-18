@@ -54,6 +54,36 @@
       "source": "Microsoft 拆股历史；投资者关系", "confidence": "verified", "note": "1 拆 2"
     },
     {
+      "symbol": "US:KO", "ex_date": "2012-08-13", "kind": "split", "ratio": 2.0,
+      "source": "The Coca-Cola Company 投资者关系 Stock Splits 页（登记日 2012-07-27，派发日 2012-08-10）；SEC 8-K 2012-08-23 Exhibit 99.1",
+      "confidence": "verified", "note": "1 拆 2；2012 年 8 月月线腰斩的真实原因，add to registry 后前复权可消除断层"
+    },
+    {
+      "symbol": "US:KO", "ex_date": "1996-05-13", "kind": "split", "ratio": 2.0,
+      "source": "The Coca-Cola Company 投资者关系 Stock Splits 页（登记日 1996-05-01）；Investing.com KO 拆股记录",
+      "confidence": "verified", "note": "1 拆 2"
+    },
+    {
+      "symbol": "US:KO", "ex_date": "1992-05-12", "kind": "split", "ratio": 2.0,
+      "source": "The Coca-Cola Company 投资者关系 Stock Splits 页（登记日 1992-05-01）；Investing.com KO 拆股记录",
+      "confidence": "verified", "note": "1 拆 2"
+    },
+    {
+      "symbol": "US:KO", "ex_date": "1990-05-14", "kind": "split", "ratio": 2.0,
+      "source": "The Coca-Cola Company 投资者关系 Stock Splits 页（登记日 1990-05-01）；Investing.com KO 拆股记录",
+      "confidence": "verified", "note": "1 拆 2"
+    },
+    {
+      "symbol": "US:KO", "ex_date": "1986-07-01", "kind": "split", "ratio": 3.0,
+      "source": "The Coca-Cola Company 投资者关系 Stock Splits 页（登记日 1986-06-16）；Investing.com KO 拆股记录",
+      "confidence": "verified", "note": "1 拆 3"
+    },
+    {
+      "symbol": "US:WMT", "ex_date": "2024-02-26", "kind": "split", "ratio": 3.0,
+      "source": "Walmart Inc. 2024-01-30 公告；2024-02-26 生效（Motley Fool / Yahoo Finance 报道）",
+      "confidence": "verified", "note": "1 拆 3"
+    },
+    {
       "symbol": "SH:600519", "ex_date": "2024-06-19", "kind": "unknown", "ratio": 1.0,
       "source": "东财分红送配数据源（当前 offline 环境未能取到精确除权前收盘）", "confidence": "reported",
       "note": "现金分红事件已探测到，但缺少可信的除权前收盘价，无法计算精确复权因子；按规则保留原始数据并标记异常，不猜测比例。接入可信源补全 prev_close 后改为 verified 才会生效"

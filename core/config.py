@@ -20,9 +20,13 @@ DEFAULTS: Dict[str, Any] = {
     # 阶段 4：用户自定义的置顶品种（按置顶先后排列）。独立于 symbols 顺序，
     # 且优先于市值 / 涨跌幅等所有排序规则；旧配置缺该键时为空，安全迁移。
     "pinned_symbols": [],
-    # 搜索历史：最多保留最近 100 条，最新在前；旧配置缺键为空列表，安全迁移。
+    # 搜索历史：最多保留最近 50 条，最新在前；旧配置缺键为空列表，安全迁移。
+    # 元素为资产对象 {query,symbol,label,name,asset_type,market,chain,logo,ts}，
+    # 兼容旧的纯字符串数组（加载时自动包装）。
     "search_history": [],
-    # 链上合约品种元数据：{ "ONCHAIN:<address>": {address,code,name,chain,...} }。
+    # 历史价格口径：raw / split_adjusted / total_return。
+    # 切换后图表重新抓取并写入隔离缓存，绝不混用不同口径。
+    "adjust_mode": "split_adjusted",    # 链上合约品种元数据：{ "ONCHAIN:<address>": {address,code,name,chain,...} }。
     # 这类币种没有 K 线，但可收藏、可看真实链上报价；元数据落盘保证重启后
     # 自选行仍能显示代币代码与名称。旧配置缺该键时为空字典，安全迁移。
     "onchain_symbols": {},

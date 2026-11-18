@@ -98,6 +98,27 @@ class Candle:
 _ADJUST_REPORT: Dict[str, dict] = {}
 
 
+# 当前历史价格口径（core.adjust_mode）；由配置层在启动时设置，
+# 切换口径后 K 线重新抓取并写入隔离的缓存命名空间。
+_adjust_mode = "split_adjusted"
+
+
+def set_adjust_mode(mode: str):
+    from core import adjust_mode as _am
+    global _adjust_mode
+    next_mode = _am.normalize(mode)
+    changed = next_mode != _adjust_mode
+    _adjust_mode = next_mode
+    if changed:
+        # 复权口径变了：内存里的处理结果不可复用，交给调用方刷新图表
+        _ADJUST_REPORT.clear()
+    return _adjust_mode
+
+
+def get_adjust_mode() -> str:
+    return _adjust_mode
+
+
 def adjustment_report(symbol: str) -> dict:
     """返回该标的最近一次的公司行为处理报告（只读）。"""
     return dict(_ADJUST_REPORT.get(symbol, {}))
@@ -127,18 +148,26 @@ def _postprocess(symbol: str, candles: List[Candle], basis: str,
         if not actions:
             return candles
         applied: list = []
+        from core import adjust_mode as _am
+        mode = _am.normalize(_adjust_mode)
         if price_already_adjusted:
             # 价格已由数据源前复权：成交量按已核实份额事件补齐。
             # 该场景无法用价格跳空做门控，直接采用 verified 事件。
             applied = [a for a in actions if a.usable and not a.source_rebased
                        and a.volume_factor != 1.0]
-            out = _pa.adjust_volume_only(candles, actions)
+            out = _pa.adjust_volume_only(candles, actions) \
+                if mode != _am.RAW else candles
+        elif mode == _am.RAW:
+            # Raw：完全保留数据源原始名义价，只记录异常，不套任何因子
+            out = candles
+            applied = []
         else:
             # 原始价：经验门控，只有确认"未复权"的事件才真正应用。
+            # split_adjusted = 份额变动前复权；total_return = 含分红后复权。
             effective = _pa.detect_unadjusted_events(candles, actions)
             applied = effective
-            out = _pa.apply_adjustment(candles, effective,
-                                       basis="raw", mode="forward") if effective else candles
+            out = _pa.apply_adjustment(
+                candles, effective, basis="raw", mode=mode) if effective else candles
         anomalies = _pa.detect_anomalies(out, actions)
         _ADJUST_REPORT[symbol] = {
             "symbol": symbol,
