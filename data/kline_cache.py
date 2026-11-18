@@ -6,7 +6,8 @@
 
 - 每个 (symbol, interval) 一张逻辑表，按 ts 主键 upsert，翻页回溯不会重复；
 - meta 表记录「是否已回溯到上市首根」与最后更新时间；
-- 缓存新鲜期内完全不联网（默认 15 分钟），过期后才发一次增量请求；
+- 新鲜度同时看**周期边界**和时长：跨到新桶立即失效；源确认“本桶无新根”
+  后记 checked_bucket，在 TTL 内不再重复打源，既不滞后也不放大请求；
 - GUI 线程与 KlineWorker / HistoryWorker 各用各自的 sqlite 连接
   （threading.local），避免跨线程复用连接报错；
 - 路径在 %APPDATA%/CryptoTicker/klines.sqlite3，测试用临时 APPDATA 隔离。
@@ -17,14 +18,14 @@ import threading
 import time
 
 from data.klines import Candle
+from core import kline_time as _kt
 
 _DB_NAME = "klines.sqlite3"
-_FRESH_SECONDS = 900          # 15 分钟内直接读本地，不发 K 线请求
-# 缓存结构版本：v1 = 复权改造之前（价格/成交量口径不一致）。
-#  bump 到 v2 让所有旧缓存自动失效并重新按复权口径抓取；
-#  v3 = 加入「未登记拆股品种」的自动检测复权，旧 v2 缓存需重建。
-# 以后每当复权算法语义变化都应 +1。
-_CACHE_SCHEMA = "v3-auto-split"
+_FRESH_SECONDS = 900          # 同一周期内最长 15 分钟复核一次（边界优先）
+# 单一时钟入口，测试可注入固定时间驱动跨日/跨月边界
+_now = time.time
+# v4 = 加入周期边界新鲜度（checked_bucket）；旧 v3 元数据无该列，自动失效重建
+_CACHE_SCHEMA = "v4-time-sync"
 _local = threading.local()
 
 
@@ -68,10 +69,12 @@ def _conn() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS meta (
             symbol TEXT NOT NULL, interval TEXT NOT NULL,
             exhausted INTEGER DEFAULT 0, updated REAL DEFAULT 0,
+            checked_bucket REAL DEFAULT 0,
             PRIMARY KEY (symbol, interval))""")
     # 兼容旧库：新增列但保留原有行；schema 为空会被判定为过期并重新抓取。
     for col, decl in (("schema", "TEXT DEFAULT ''"),
-                      ("adj_tag", "TEXT DEFAULT ''")):
+                      ("adj_tag", "TEXT DEFAULT ''"),
+                      ("checked_bucket", "REAL DEFAULT 0")):
         try:
             conn.execute(f"ALTER TABLE meta ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError:
@@ -83,25 +86,79 @@ def _conn() -> sqlite3.Connection:
 
 def _meta(symbol: str, interval: str):
     row = _conn().execute(
-        "SELECT exhausted, updated, schema, adj_tag FROM meta "
-        "WHERE symbol=? AND interval=?", (symbol, interval)).fetchone()
+        "SELECT exhausted, updated, schema, adj_tag, checked_bucket "
+        "FROM meta WHERE symbol=? AND interval=?", (symbol, interval)).fetchone()
     if not row:
-        return (False, 0.0, "", "")
+        return (False, 0.0, "", "", 0.0)
     return (bool(row[0]), float(row[1]),
             row[2] if row[2] is not None else "",
-            row[3] if row[3] is not None else "")
+            row[3] if row[3] is not None else "",
+            float(row[4] or 0))
+
+
+def expected_bucket(symbol: str, interval: str,
+                    now: float | None = None) -> float:
+    """当前时刻应形成的 K 线桶起点（按市场时区）。"""
+    return _kt.bucket_start(_now() if now is None else now,
+                            interval, symbol)
+
+
+def last_bar_ts(symbol: str, interval: str) -> float:
+    """该序列最后一根真实 K 线的 ts；空序列返回 0。"""
+    row = _conn().execute(
+        "SELECT MAX(ts) FROM candles WHERE symbol=? AND interval=?",
+        (symbol, interval)).fetchone()
+    return float(row[0] or 0) if row else 0.0
 
 
 def is_fresh(symbol: str, interval: str, ttl: int = _FRESH_SECONDS) -> bool:
-    """缓存是否存在、仍在新鲜期、且口径与当前复权版本/事件指纹一致。"""
-    _ex, updated, schema, adj_tag = _meta(symbol, interval)
+    """缓存是否足够新：先看周期边界，再看时长与复权口径。
+
+    关键修复：旧实现只看 `now - updated > 900`，导致 00:00 跨到新周期后
+    仍用昨天的缓存最多 15 分钟，TTL 一过又一次性补齐（跳变）。
+    现在只要“缓存最后一根不在当前桶”且“尚未确认本桶无新根”，立即判旧；
+    数据源确认本桶没有新根后写 checked_bucket，TTL 内不再重复打源。
+    """
+    _ex, updated, schema, adj_tag, checked = _meta(symbol, interval)
     if schema != _CACHE_SCHEMA:       # 旧版缓存（未复权）：强制失效
         return False
     if adj_tag != _adjust_tag(symbol):  # 公司行为登记库已变化：强制失效
         return False
-    if updated <= 0 or (time.time() - updated) > ttl:
+    last = last_bar_ts(symbol, interval)
+    if last <= 0:
         return False
-    return count(symbol, interval) > 0
+    now = _now()
+    bucket = expected_bucket(symbol, interval, now)
+    # 已拿到当前桶的真实 K 线：TTL 内无需再请求
+    if last >= bucket and (now - updated) <= ttl:
+        return True
+    # 源已确认本桶没有新根（例如休市 / 尚未成交）：TTL 内也不再请求
+    if checked >= bucket and (now - updated) <= ttl:
+        return True
+    return False
+
+
+def mark_checked(symbol: str, interval: str,
+                 bucket: float | None = None,
+                 now: float | None = None):
+    """记录“该周期桶已经向数据源确认过，没有更新”，避免刷新风暴。
+
+    只改 meta，不动任何真实 K 线；下一个桶到来时 is_fresh 会立刻失效。
+    """
+    now = _now() if now is None else float(now)
+    bucket = (expected_bucket(symbol, interval, now)
+              if bucket is None else float(bucket))
+    conn = _conn()
+    ex, _upd, schema, tag, checked = _meta(symbol, interval)
+    conn.execute(
+        "INSERT INTO meta(symbol,interval,exhausted,updated,schema,adj_tag,"
+        "checked_bucket) VALUES (?,?,?,?,?,?,?) "
+        "ON CONFLICT(symbol,interval) DO UPDATE SET "
+        "updated=excluded.updated, checked_bucket=excluded.checked_bucket, "
+        "schema=excluded.schema, adj_tag=excluded.adj_tag",
+        (symbol, interval, int(ex), now, _CACHE_SCHEMA,
+         tag or _adjust_tag(symbol), max(float(checked or 0), bucket)))
+    conn.commit()
 
 
 def is_exhausted(symbol: str, interval: str) -> bool:
@@ -137,32 +194,47 @@ def take_before(symbol: str, interval: str, before_ts: float,
 
 
 def save(symbol: str, interval: str, candles: list,
-         exhausted: bool | None = None):
-    """写入/更新 K 线；exhausted=None 表示不改动到头标记。"""
+         exhausted: bool | None = None,
+         touch: bool = True,
+         checked_bucket: float | None = None):
+    """写入/更新真实 K 线。
+
+    - exhausted=None 表示不改动到头标记；
+    - touch=False 供历史回溯使用：只写 candles/exhausted，不刷新 `updated`，
+      否则长时间分页会一直把缓存伪装成“刚更新”，挡住最新行情请求；
+    - 预览 K 线（preview=True）一律不落盘，绝不污染真实历史。
+    """
     conn = _conn()
     tag = _adjust_tag(symbol)
-    if candles:
+    real = [c for c in (candles or []) if not getattr(c, "preview", False)]
+    if real:
         conn.executemany(
             "INSERT OR REPLACE INTO candles "
             "(symbol,interval,ts,open,high,low,close,volume,label) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             [(symbol, interval, c.ts, c.open, c.high, c.low, c.close,
-              c.volume, c.time_label) for c in candles])
-    if exhausted is None:
-        conn.execute(
-            "INSERT INTO meta(symbol,interval,exhausted,updated,schema,adj_tag) "
-            "VALUES (?,?,0,?,?,?) ON CONFLICT(symbol,interval) "
-            "DO UPDATE SET updated=excluded.updated, schema=excluded.schema, "
-            "adj_tag=excluded.adj_tag",
-            (symbol, interval, time.time(), _CACHE_SCHEMA, tag))
-    else:
-        conn.execute(
-            "INSERT INTO meta(symbol,interval,exhausted,updated,schema,adj_tag) "
-            "VALUES (?,?,?,?,?,?) ON CONFLICT(symbol,interval) DO UPDATE SET "
-            "exhausted=excluded.exhausted, updated=excluded.updated, "
-            "schema=excluded.schema, adj_tag=excluded.adj_tag",
-            (symbol, interval, int(bool(exhausted)), time.time(),
-             _CACHE_SCHEMA, tag))
+              c.volume, c.time_label) for c in real])
+
+    ex, updated, schema, old_tag, checked = _meta(symbol, interval)
+    if exhausted is not None:
+        ex = int(bool(exhausted))
+    now = _now()
+    new_updated = now if touch else float(updated or 0)
+    if checked_bucket is not None:
+        checked = max(float(checked or 0), float(checked_bucket))
+    elif real:
+        data_bucket = max(_kt.bucket_start(c.ts, interval, symbol)
+                          for c in real)
+        checked = max(float(checked or 0), float(data_bucket))
+    conn.execute(
+        "INSERT INTO meta(symbol,interval,exhausted,updated,schema,adj_tag,"
+        "checked_bucket) VALUES (?,?,?,?,?,?,?) "
+        "ON CONFLICT(symbol,interval) DO UPDATE SET "
+        "exhausted=excluded.exhausted, updated=excluded.updated, "
+        "schema=excluded.schema, adj_tag=excluded.adj_tag, "
+        "checked_bucket=excluded.checked_bucket",
+        (symbol, interval, int(ex), new_updated,
+         _CACHE_SCHEMA, tag or old_tag, checked))
     conn.commit()
 
 

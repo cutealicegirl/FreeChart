@@ -191,7 +191,8 @@ ok('24. 输入框聚焦 / 点顶栏 / 尺寸变化都会恢复工具区',
   js.indexOf("$('topbar').addEventListener('click'") >= 0 &&
   js.indexOf("window.addEventListener('resize', measureHead)") >= 0);
 ok('25. 切回列表页强制展开，切换市场 / 子页重置方向累计',
-  js.indexOf('if (page === \'list\') { resetHead();') >= 0 &&
+  js.indexOf("if (page === 'list')") >= 0 &&
+  js.indexOf('resetHead(); renderList(); requestWindow();') >= 0 &&
   js.indexOf('headAcc = 0; headLastTop = list.scrollTop || 0;') >= 0);
 ok('26. 缩放按钮逻辑已删，双指捏合 zoomBy 仍保留',
   js.indexOf("act === 'zoomin'") < 0 &&

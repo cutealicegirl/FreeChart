@@ -50,6 +50,12 @@ py_crypto = py_keys("CRYPTO_INTERVALS")
 js_crypto = js_intervals("CRYPTO_INTERVALS")
 ok("crypto 周期集合双端一致", py_crypto == js_crypto,
    f"\n  Windows={py_crypto}\n  Android={js_crypto}")
+# 防止“两端一致地缺失”通过：用户明确要求覆盖 1m~12h 全周期。
+EXPECTED_CRYPTO = ["1m", "5m", "15m", "30m", "1h", "2h", "4h",
+                   "6h", "12h", "1d", "3d", "1w", "1M", "1y"]
+ok("加密端覆盖全部要求周期（含 2h/6h/12h）",
+   py_crypto == EXPECTED_CRYPTO,
+   f"\n  Windows={py_crypto}\n  期望={EXPECTED_CRYPTO}")
 
 # 2) 股票（A股）周期集合：桌面 STOCK_INTERVALS == Android CN_MINUTES + STOCK_INTERVALS
 py_stock = py_keys("STOCK_INTERVALS")
@@ -94,6 +100,10 @@ py_oc = [k for _, k in _ock.ONCHAIN_INTERVALS]
 js_oc = js_intervals("OC_INTERVALS")
 ok("链上 DEX 周期集合双端一致", py_oc == js_oc,
    f"\n  Windows={py_oc}\n  Android={js_oc}")
+ok("链上 DEX 同样覆盖 2h/6h/12h",
+   py_oc == ["1m", "5m", "15m", "30m", "1h", "2h", "4h",
+             "6h", "12h", "1d", "3d", "1w", "1M"],
+   f"\n  Windows={py_oc}")
 
 # 9) 链上周期 → DEX timeframe 映射双端一致（GeckoTerminal aggregate）
 py_tf = _ock._GT_TF

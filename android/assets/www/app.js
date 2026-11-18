@@ -91,7 +91,8 @@
   var RUGCHECK = 'https://api.rugcheck.xyz/v1/tokens/';
 
   var CRYPTO_INTERVALS = [['1分', '1m'], ['5分', '5m'], ['15分', '15m'],
-                          ['30分', '30m'], ['1时', '1h'], ['4时', '4h'],
+                          ['30分', '30m'], ['1时', '1h'], ['2时', '2h'],
+                          ['4时', '4h'], ['6时', '6h'], ['12时', '12h'],
                           ['日K', '1d'], ['3日', '3d'], ['周K', '1w'],
                           ['月K', '1M'], ['年K', '1y']];
   var STOCK_INTERVALS = [['日K', 'day'], ['3日', '3day'],
@@ -171,7 +172,111 @@
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
       ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
-  function nowSec() { return Math.floor(Date.now() / 1000); }
+  // 单一时钟入口：测试可注入固定时间，驱动跨日 / 跨月 / DST 边界。
+  var __nowMsOverride = null;
+  function nowMs() { return __nowMsOverride === null ? Date.now() : __nowMsOverride; }
+  function nowSec() { return Math.floor(nowMs() / 1000); }
+
+  // ---- K 线时间基准（与桌面 core/kline_time.py 同口径）----
+  // 内部时间戳统一为 Unix 秒；桶边界按数据源所属市场时区，而不是设备时区。
+  var KLINE_SEC = {
+    '1m': 60, '5m': 300, '15m': 900, '30m': 1800,
+    '1h': 3600, '2h': 7200, '4h': 14400, '6h': 21600, '12h': 43200,
+    '1d': 86400, '3d': 259200, '1w': 604800, '1M': 2592000, '1y': 31536000,
+    m1: 60, m5: 300, m15: 900, m30: 1800, m60: 3600,
+    m120: 7200, m360: 21600, m720: 43200,
+    day: 86400, '3day': 259200, week: 604800, month: 2592000, '1year': 31536000
+  };
+  function klineMarket(sym) {
+    var s = String(sym || '');
+    if (isOnchain(s) || s.indexOf('ONCHAIN:') === 0) return 'crypto';
+    if (s.indexOf('US:') === 0) return 'us';
+    if (/^(SH:|SZ:|HK:)/.test(s)) return 'cn';
+    return 'crypto';
+  }
+  function klineNthSunday(y, m, nth) {
+    var days = [];
+    for (var d = 1; d <= 14; d++) {
+      if (new Date(Date.UTC(y, m - 1, d)).getUTCDay() === 0) days.push(d);
+    }
+    return days[nth - 1];
+  }
+  function klineOffsetMs(sym, utcMs) {
+    var mk = klineMarket(sym);
+    if (mk === 'cn') return 8 * 3600000;
+    if (mk !== 'us') return 0;
+    var y = new Date(utcMs).getUTCFullYear();
+    var mar = Date.UTC(y, 2, klineNthSunday(y, 3, 2), 7);
+    var nov = Date.UTC(y, 10, klineNthSunday(y, 11, 1), 6);
+    return (utcMs >= mar && utcMs < nov) ? -4 * 3600000 : -5 * 3600000;
+  }
+  function klineBucketStart(ts, iv, sym) {
+    ts = Number(ts) || 0;
+    var sec = KLINE_SEC[iv];
+    if (!sec) return ts;
+    var off = klineOffsetMs(sym, ts * 1000);
+    if (sec < 86400) {
+      var shifted = ts * 1000 + off;
+      return (Math.floor(shifted / (sec * 1000)) * sec * 1000 - off) / 1000;
+    }
+    var d = new Date(ts * 1000 + off);
+    var y = d.getUTCFullYear(), mo = d.getUTCMonth(), da = d.getUTCDate();
+    var startMs;
+    if (iv === '3d' || iv === '3day') {
+      var dayNo = Math.floor(Date.UTC(y, mo, da) / 86400000);
+      startMs = Math.floor(dayNo / 3) * 3 * 86400000;
+    } else if (iv === '1w' || iv === 'week') {
+      var dow = (d.getUTCDay() + 6) % 7;   // 周一为一周起点
+      startMs = Date.UTC(y, mo, da) - dow * 86400000;
+    } else if (iv === '1M' || iv === 'month') {
+      startMs = Date.UTC(y, mo, 1);
+    } else if (iv === '1y' || iv === '1year') {
+      startMs = Date.UTC(y, 0, 1);
+    } else {
+      startMs = Date.UTC(y, mo, da);
+    }
+    return (startMs - off) / 1000;
+  }
+  function klineNextBucket(ts, iv, sym) {
+    var sec = KLINE_SEC[iv];
+    if (!sec) return ts;
+    var b = klineBucketStart(ts, iv, sym);
+    if (iv !== '1M' && iv !== 'month' && iv !== '1y' && iv !== '1year') {
+      return b + sec;
+    }
+    var off = klineOffsetMs(sym, b * 1000);
+    var d = new Date(b * 1000 + off);
+    var y = d.getUTCFullYear(), mo = d.getUTCMonth();
+    var next = (iv === '1y' || iv === '1year')
+      ? Date.UTC(y + 1, 0, 1) : Date.UTC(y, mo + 1, 1);
+    return (next - off) / 1000;
+  }
+  function klineLabel(ts, iv, sym) {
+    var d = new Date(Number(ts) * 1000 + klineOffsetMs(sym, Number(ts) * 1000));
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    var md = p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
+    if (iv === '1M' || iv === 'month') return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1);
+    if (iv === '1y' || iv === '1year') return String(d.getUTCFullYear());
+    if (iv === '1d' || iv === '3d' || iv === '1w' ||
+        iv === 'day' || iv === '3day' || iv === 'week') return md;
+    return md + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes());
+  }
+  function refreshSeconds(iv) {
+    var sec = KLINE_SEC[iv] || 60;
+    if (sec <= 1800) return 10;
+    if (sec <= 21600) return 30;
+    return 60;
+  }
+  function klinePreviewFields(sym, iv, price, quoteTs) {
+    var p = Number(price);
+    if (!isFinite(p) || p <= 0) return null;
+    var b = klineBucketStart(nowSec(), iv, sym);
+    return {
+      ts: b, label: klineLabel(b, iv, sym),
+      o: p, h: p, l: p, c: p, v: 0, preview: true,
+      quoteTs: Number(quoteTs) || nowSec()
+    };
+  }
   function uniq(arr) {
     var seen = {}, out = [];
     for (var i = 0; i < arr.length; i++) {
@@ -700,8 +805,8 @@
       if (force) { for (var pi = 0; pi < syms.length; pi++) _ocPending[syms[pi]] = 1; }
       return Promise.resolve(0);
     }
-    if (!force && Date.now() - _ocLast < 60000) return Promise.resolve(0);
-    _ocBusy = true; _ocLast = Date.now();
+    if (!force && nowMs() - _ocLast < 60000) return Promise.resolve(0);
+    _ocBusy = true; _ocLast = nowMs();
     // 记录发起时的图表请求序号：回调里据此判断图表是否需要跟着重绘，
     // 防止切到别的链上品种后，旧请求回来重绘当前图表（数据写入照常）。
     var chartSeqAtStart = chartLoadSeq;
@@ -833,7 +938,7 @@
       meta.listed = listedYear(sym);
       meta.cap_unit = '亿元（本市场计价货币）';
       meta.source = '腾讯行情';
-      meta.asof = Date.now();
+      meta.asof = nowMs();
       META[sym] = meta;
     }
     return out;
@@ -882,7 +987,7 @@
       m.listed = listedYear(sym);
       m.cap_unit = 'USD';
       m.source = 'CoinLore';
-      m.asof = Date.now();
+      m.asof = nowMs();
       META[sym] = m;
       n++;
     }
@@ -959,7 +1064,7 @@
   // ---- CoinLore 元数据（仅在使用市值/流动性排序或打开加密详情时后台拉取） ----
   function needMeta(mode) { return !!META_MODES[mode]; }
   function metaFresh() {
-    if (_metaDoneAt && Date.now() - _metaDoneAt < 30 * 60 * 1000) return true;
+    if (_metaDoneAt && nowMs() - _metaDoneAt < 30 * 60 * 1000) return true;
     var n = 0;
     for (var s in META) { if (META[s] && META[s].source === 'CoinLore') n++; }
     return n > 0;
@@ -974,7 +1079,7 @@
         .catch(function () { return 0; }));
     }
     return Promise.all(jobs).then(function () {
-      _metaDoneAt = Date.now();
+      _metaDoneAt = nowMs();
       _metaLoading = false;
       saveMeta();
     }).catch(function () { _metaLoading = false; });
@@ -994,6 +1099,10 @@
   var chartLoadSeq = 0;
   var VIEW = { count: Number(CFG.chart_view_count) || 90,
                pan: Number(CFG.chart_view_pan) || 0 };
+  // 当前品种/周期的轻量 K 线缓存：只保留最近使用的 6 个序列，避免 localStorage 膨胀。
+  // checkedBucket 表示“该周期桶已向数据源确认过没有新根”，防止边界附近反复打源。
+  var KLINE_CACHE = readJSON('ct_kline', {});
+  var _klineTimer = null;
   var openSheetId = '';
   var _suppressClickUntil = 0;   // 长按已弹出操作表后，抑制抬手产生的 click
 
@@ -1349,10 +1458,10 @@
       return Promise.resolve();       // 全是链上品种：不发交易所请求
     }
     var key = syms.join(',');
-    if (!force && key === _lastKey && Date.now() - _lastAt < 3000) return Promise.resolve();
+    if (!force && key === _lastKey && nowMs() - _lastAt < 3000) return Promise.resolve();
     if (_inFlight) { if (force) _pendingForce = true; return Promise.resolve(); }
     _inFlight = true;
-    _lastKey = key; _lastAt = Date.now();
+    _lastKey = key; _lastAt = nowMs();
     setStatus('● 刷新中 · ' + syms.length + ' 个品种', false);
 
     return fetchTickers(syms).then(function (res) {
@@ -1400,10 +1509,23 @@
     if (!sym) return;
     // 链上报告比交易所报价慢得多：走 60 秒节流，不能按 900ms 实时轮询
     // 去打 Rugcheck，否则既拖慢界面也容易被限流。
-    if (isOnchain(sym)) { refreshOnchain([sym], false); updateChartHead(); return; }
+    if (isOnchain(sym)) {
+      // 链上报告比交易所报价慢得多：走 60 秒节流，不能按 900ms 实时轮询
+      // 去打 Rugcheck，否则既拖慢界面也容易被限流。
+      refreshOnchain([sym], false).then(function () {
+        updateChartHead();
+        var q = ONCHAIN_Q[sym];
+        if (q && q.price) applyChartQuote(q.price, q.ts || nowSec());
+      });
+      return;
+    }
     fetchTickers([sym]).then(function (res) {
       applyTickers(res.map, res.sources);
       updateChartHead();
+      var q = TICKERS[sym];
+      if (q && q.price !== null && q.price !== undefined) {
+        applyChartQuote(q.price, q.ts || nowSec());
+      }
     }).catch(function () { /* 静默：下一次轮询自动重试 */ });
   }
   function restartLiveTimer() {
@@ -1501,7 +1623,10 @@
     $('pageSearch').hidden = page !== 'search';
     setNav(page);
     setTitle(pageTitle(page));
-    if (page === 'list') { resetHead(); renderList(); requestWindow(); }
+    if (page === 'list') {
+      if (_klineTimer) { clearInterval(_klineTimer); _klineTimer = null; }
+      resetHead(); renderList(); requestWindow();
+    }
     if (page === 'chart') {
       if (!CHART_SYMBOL) {
         CHART_SYMBOL = (watchList(MARKET)[0] || ALL[MARKET][0] || 'BTC');
@@ -1511,6 +1636,7 @@
     if (page === 'settings') syncSettings();
     if (page === 'search') renderSearchPage($('searchBox').value || '');
     restartLiveTimer();
+    restartKlineTimer();
   }
 
   // ===================== 弹出层 =====================
@@ -1947,15 +2073,18 @@
   var OC_POOL_CACHE = readJSON('ct_oc_pools', {});     // { addr: {net, pool, ts} }
   var OC_TF = {
     '1m': ['minute', 1], '5m': ['minute', 5], '15m': ['minute', 15],
-    '30m': ['minute', 30], '1h': ['hour', 1], '4h': ['hour', 4],
+    '30m': ['minute', 30], '1h': ['hour', 1], '2h': ['hour', 2],
+    '4h': ['hour', 4], '6h': ['hour', 6], '12h': ['hour', 12],
     '1d': ['day', 1], '3d': ['day', 3], '1w': ['week', 1], '1M': ['month', 1]
   };
   var OC_TF_SEC = {
     '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600,
-    '4h': 14400, '1d': 86400, '3d': 259200, '1w': 604800, '1M': 2592000
+    '2h': 7200, '4h': 14400, '6h': 21600, '12h': 43200,
+    '1d': 86400, '3d': 259200, '1w': 604800, '1M': 2592000
   };
   var OC_INTERVALS = [['1分', '1m'], ['5分', '5m'], ['15分', '15m'],
-                      ['30分', '30m'], ['1时', '1h'], ['4时', '4h'],
+                      ['30分', '30m'], ['1时', '1h'], ['2时', '2h'],
+                      ['4时', '4h'], ['6时', '6h'], ['12时', '12h'],
                       ['日K', '1d'], ['3日', '3d'], ['周K', '1w'], ['月K', '1M']];
   var OC_STATUS = {};   // { sym: {state, source, ts} } 最近一次获取状态
 
@@ -1973,8 +2102,10 @@
       if (!(ts > 0 && o > 0 && h > 0 && l > 0 && c > 0)) continue;
       if (h + 1e-12 < Math.max(o, c) || l - 1e-12 > Math.min(o, c) || h < l) continue;
       if (v < 0 || !isFinite(v)) continue;
-      if (OC_TF_SEC[interval]) ts = Math.floor(ts / OC_TF_SEC[interval]) * OC_TF_SEC[interval];
-      out.push(candle(ts, o, h, l, c, v, interval));
+      if (KLINE_SEC[interval]) {
+        ts = klineBucketStart(ts, interval, 'ONCHAIN:UTC');
+      }
+      out.push(candle(ts, o, h, l, c, v, interval, 'ONCHAIN:UTC'));
     }
     out.sort(function (a, b) { return a.ts - b.ts; });
     var seen = {}, uniq = [];
@@ -1988,7 +2119,7 @@
   // 解析交易池：全局搜索选流动性最高的池，结果落 localStorage 缓存
   function ocResolvePool(addr) {
     var hit = OC_POOL_CACHE[addr];
-    if (hit && hit.net && hit.pool && Date.now() - (hit.ts || 0) < 6 * 3600 * 1000) {
+    if (hit && hit.net && hit.pool && nowMs() - (hit.ts || 0) < 6 * 3600 * 1000) {
       return Promise.resolve(hit);
     }
     return http(GT_BASE + '/search/pools?query=' + encodeURIComponent(addr) + '&page=1')
@@ -2000,7 +2131,7 @@
           var liq = Number(at.reserve_in_usd || 0), k = id.indexOf('_');
           if (k <= 0) continue;
           if (!best || liq > best.liq) {
-            best = { net: id.slice(0, k), pool: id.slice(k + 1), liq: liq, ts: Date.now() };
+            best = { net: id.slice(0, k), pool: id.slice(k + 1), liq: liq, ts: nowMs() };
           }
         }
         if (best) { OC_POOL_CACHE[addr] = best; writeJSON('ct_oc_pools', OC_POOL_CACHE); }
@@ -2042,7 +2173,7 @@
     var addr = ocAddr(sym), key = ocCacheKey(sym, interval);
     var cached = OC_KLINE_CACHE[key];
     if (cached && cached.bars && cached.bars.length &&
-        Date.now() - (cached.ts || 0) < 15 * 60 * 1000) {
+        nowMs() - (cached.ts || 0) < 15 * 60 * 1000) {
       OC_STATUS[sym] = { state: 'cache', source: cached.source || '本地缓存', ts: cached.ts };
       return Promise.resolve(cached.bars);
     }
@@ -2056,9 +2187,9 @@
       var final = Object.keys(merged).map(function (k) { return merged[k]; })
         .sort(function (a, b) { return a.ts - b.ts; });
       if (final.length > 10000) final = final.slice(final.length - 10000);
-      OC_KLINE_CACHE[key] = { bars: final, source: 'DEX OHLCV', ts: Date.now() };
+      OC_KLINE_CACHE[key] = { bars: final, source: 'DEX OHLCV', ts: nowMs() };
       writeJSON('ct_oc_kline', OC_KLINE_CACHE);
-      OC_STATUS[sym] = { state: 'ok', source: 'DEX OHLCV', ts: Date.now() };
+      OC_STATUS[sym] = { state: 'ok', source: 'DEX OHLCV', ts: nowMs() };
       return final;
     });
   }
@@ -2076,32 +2207,23 @@
     if (isOnchain(sym)) return '1h';
     return marketOf(sym) === 'crypto' ? '15m' : 'day';
   }
-  function labelFor(ts, interval) {
-    var d = new Date(ts * 1000);
-    function p(x) { return (x < 10 ? '0' : '') + x; }
-    var md = p(d.getMonth() + 1) + '-' + p(d.getDate());
-    if (interval === '1M' || interval === 'month') return d.getFullYear() + '-' + p(d.getMonth() + 1);
-    if (interval === '1year') return String(d.getFullYear());
-    if (interval === '1d' || interval === 'day' || interval === 'week' ||
-        interval === '1w' || interval === '3day') return md;
-    return md + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  function labelFor(ts, interval, sym) {
+    // 与桌面 core.kline_time.label_for 同源；不再用设备本地时间
+    return klineLabel(ts, interval, sym || CHART_SYMBOL || 'crypto');
   }
-  function candle(ts, o, h, l, c, v, interval) {
-    return { ts: ts, label: labelFor(ts, interval), o: o, h: h, l: l, c: c, v: v };
+  function candle(ts, o, h, l, c, v, interval, sym) {
+    return { ts: ts, label: labelFor(ts, interval, sym), o: o, h: h, l: l, c: c, v: v };
   }
-  function aggregate(rows, mode, interval) {
+  function aggregate(rows, mode, interval, sym) {
     if (!rows.length) return [];
+    var iv = (mode === '3day') ? '3day' : (mode === 'week') ? 'week'
+      : (mode === 'month') ? 'month' : '1year';
     var groups = {}, order = [];
     for (var i = 0; i < rows.length; i++) {
-      var d = new Date(rows[i].ts * 1000), key;
-      if (mode === '3day') key = Math.floor(d.getTime() / 86400000 / 3);
-      else if (mode === 'week') {
-        var day = (d.getDay() + 6) % 7;
-        key = Math.floor((d.getTime() - day * 86400000) / 86400000);
-      } else if (mode === 'month') key = d.getFullYear() * 12 + d.getMonth();
-      else key = d.getFullYear();
+      // 桶起点统一按市场时区；输出 ts=桶起点，不再用组内首根时间
+      var key = klineBucketStart(rows[i].ts, iv, sym || CHART_SYMBOL);
       if (!groups[key]) {
-        groups[key] = { ts: rows[i].ts, o: rows[i].o, h: rows[i].h,
+        groups[key] = { ts: key, o: rows[i].o, h: rows[i].h,
                         l: rows[i].l, c: rows[i].c, v: rows[i].v };
         order.push(key);
       } else {
@@ -2114,7 +2236,7 @@
     for (var j = 0; j < order.length; j++) {
       var x = groups[order[j]];
       out.push(candle(x.ts, x.o, x.h, x.l, x.c, x.v,
-        mode === 'month' ? 'month' : (mode === '1year' ? '1year' : interval)));
+        iv === '1year' ? '1year' : iv, sym));
     }
     return out;
   }
@@ -2249,7 +2371,19 @@
     if (m) return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]).getTime() / 1000;
     return NaN;
   }
-  function parseTencentKlines(text, interval) {
+  function parseMarketDate(s, sym) {
+    // 交易所返回的是当地墙钟（无时区）。按市场时区解释，不再依赖设备时区。
+    var str = String(s).trim();
+    var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(str);
+    if (!m) m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str);
+    if (!m) m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(str);
+    if (!m) return NaN;
+    var withTime = m.length >= 6;
+    var wall = Date.UTC(+m[1], +m[2] - 1, +m[3],
+      withTime ? +m[4] : 0, withTime ? +m[5] : 0);
+    return (wall - klineOffsetMs(sym || CHART_SYMBOL, wall)) / 1000;
+  }
+  function parseTencentKlines(text, interval, sym) {
     var body;
     try { body = JSON.parse(text); } catch (e) { return []; }
     var data = (body && body.data) || {}, rows = null;
@@ -2262,26 +2396,27 @@
     if (!rows || !rows.length) return [];
     var out = [];
     for (var i = 0; i < rows.length; i++) {
-      var r = rows[i], ts = parseDate(r[0]);
+      var r = rows[i], ts = parseMarketDate(r[0], sym);
       if (!isFinite(ts)) continue;
       out.push(candle(ts, Number(r[1]), Number(r[3]), Number(r[4]),
-        Number(r[2]), Number(r[5] || 0), interval === 'day' ? 'day' : interval));
+        Number(r[2]), Number(r[5] || 0), interval === 'day' ? 'day' : interval, sym));
     }
     return out;
   }
-  function parseBinanceKlines(text, interval) {
+  function parseBinanceKlines(text, interval, sym) {
     var rows;
     try { rows = JSON.parse(text); } catch (e) { return []; }
     if (!Array.isArray(rows)) return [];
     var out = [];
     for (var i = 0; i < rows.length; i++) {
       var r = rows[i];
-      out.push(candle(Number(r[0]) / 1000, Number(r[1]), Number(r[2]),
-        Number(r[3]), Number(r[4]), Number(r[5] || 0), interval));
+      var ts = Number(r[0]) / 1000;    // Binance 毫秒 -> 统一 Unix 秒
+      out.push(candle(ts, Number(r[1]), Number(r[2]),
+        Number(r[3]), Number(r[4]), Number(r[5] || 0), interval, sym));
     }
     return out;
   }
-  function parseSinaRows(text, withTime) {
+  function parseSinaRows(text, withTime, sym) {
     var t = String(text);
     var i = t.indexOf('('), j = t.lastIndexOf(')');
     if (i >= 0 && j > i) t = t.slice(i + 1, j);
@@ -2290,10 +2425,10 @@
     if (!Array.isArray(rows)) return [];
     var out = [];
     for (var k = 0; k < rows.length; k++) {
-      var r = rows[k], ts = parseDate(r.d);
+      var r = rows[k], ts = parseMarketDate(r.d, sym);
       if (!isFinite(ts)) continue;
       out.push(candle(ts, Number(r.o), Number(r.h), Number(r.l), Number(r.c),
-        Number(r.v || 0), withTime ? 'm5' : 'day'));
+        Number(r.v || 0), withTime ? 'm5' : 'day', sym));
     }
     return out;
   }
@@ -2304,11 +2439,11 @@
       if (interval === '1y') {
         return http(BINANCE_KLINE + '?symbol=' + encodeURIComponent(sym + 'USDT') +
           '&interval=1M&limit=1000')
-          .then(function (txt) { return aggregate(parseBinanceKlines(txt, '1M'), '1year', 'month'); });
+          .then(function (txt) { return aggregate(parseBinanceKlines(txt, '1M', sym), '1year', 'month', sym); });
       }
       return http(BINANCE_KLINE + '?symbol=' + encodeURIComponent(sym + 'USDT') +
         '&interval=' + interval + '&limit=1000')
-        .then(function (txt) { return parseBinanceKlines(txt, interval); });
+        .then(function (txt) { return parseBinanceKlines(txt, interval, sym); });
     }
     code = sym.replace(':', '').toLowerCase();
     if (mk === 'us') {
@@ -2316,10 +2451,10 @@
           interval === 'month' || interval === '1year') {
         return http(SINA_US_DAY + encodeURIComponent(sym.slice(3).toLowerCase()))
           .then(function (txt) {
-            var rows = parseSinaRows(txt, false);
+            var rows = parseSinaRows(txt, false, sym);
             // 新浪美股日线为原始价：按已核实拆股事件前复权后再聚合，保证多周期同口径。
             rows = applyAdjustment(rows, CORPORATE_ACTIONS[sym]);
-            return (interval === 'day') ? rows : aggregate(rows, interval, 'day');
+            return (interval === 'day') ? rows : aggregate(rows, interval, 'day', sym);
           });
       }
       var typeMap = { m1: '1', m5: '5', m15: '15', m30: '30', m60: '60' };
@@ -2327,23 +2462,23 @@
         '&type=' + (typeMap[interval] || '5'))
         .then(function (txt) {
           // 分钟线同样可能是未复权原始价，按同一套事件前复权后再展示。
-          return applyAdjustment(parseSinaRows(txt, true), CORPORATE_ACTIONS[sym]);
+          return applyAdjustment(parseSinaRows(txt, true, sym), CORPORATE_ACTIONS[sym]);
         });
     }
     if (interval === 'm5' || interval === 'm15' || interval === 'm30' || interval === 'm60') {
       return http(TENCENT_KLINE + encodeURIComponent(code + ',' + interval + ',,,1000'))
-        .then(function (txt) { return parseTencentKlines(txt, interval); });
+        .then(function (txt) { return parseTencentKlines(txt, interval, sym); });
     }
     var url = (mk === 'hk' ? HK_KLINE : TENCENT_KLINE) +
       encodeURIComponent(code + ',day,,,640,qfq');
     return http(url).then(function (txt) {
-      var rows = parseTencentKlines(txt, 'day');
+      var rows = parseTencentKlines(txt, 'day', sym);
       // 腾讯 qfq 已前复权价格，但成交量仍是原始份额 -> 补齐成交量口径。
       rows = adjustVolumeOnly(rows, sym);
       if (interval === 'day') return rows;
       var mode = interval === '3day' ? '3day' : (interval === 'week' ? 'week'
         : (interval === 'month' ? 'month' : '1year'));
-      return aggregate(rows, mode, 'day');
+      return aggregate(rows, mode, 'day', sym);
     });
   }
 
@@ -2359,6 +2494,7 @@
     renderIntervals(ivs);
     updateChartHead();
     loadChart();
+    restartKlineTimer();
   }
   function renderIntervals(ivs) {
     var h = '';
@@ -2388,48 +2524,177 @@
   function chartLoadIsCurrent(seq, sym, iv) {
     return seq === chartLoadSeq && sym === CHART_SYMBOL && iv === CHART_INTERVAL;
   }
-  function loadChart() {
+
+  // ---- K 线缓存 / 增量合并 / 视口时间锚定 ----
+  function klineKey(sym, iv) { return String(sym) + '|' + String(iv); }
+  function mergeCandles(oldRows, incoming) {
+    var m = {}, i;
+    for (i = 0; i < (oldRows || []).length; i++) {
+      var o = oldRows[i];
+      if (!o.preview) m[o.ts] = o;       // 预览根绝不参与合并
+    }
+    for (i = 0; i < (incoming || []).length; i++) {
+      m[incoming[i].ts] = incoming[i];   // 服务端真实值覆盖旧值
+    }
+    return Object.keys(m).map(function (k) { return m[k]; })
+      .sort(function (a, b) { return a.ts - b.ts; });
+  }
+  function klineCacheGet(sym, iv) {
+    var e = KLINE_CACHE[klineKey(sym, iv)];
+    return (e && e.bars && e.bars.length) ? e.bars : null;
+  }
+  function klineCacheFresh(sym, iv) {
+    var e = KLINE_CACHE[klineKey(sym, iv)];
+    if (!e || !e.bars || !e.bars.length) return false;
+    var bucket = klineBucketStart(nowSec(), iv, sym);
+    if ((e.checkedBucket || 0) >= bucket) return true;
+    var last = e.bars[e.bars.length - 1].ts;
+    return last >= bucket && nowMs() - (e.ts || 0) < 15 * 60 * 1000;
+  }
+  function klineCachePut(sym, iv, bars, checkedBucket) {
+    if (!bars || !bars.length) return;
+    var key = klineKey(sym, iv), old = KLINE_CACHE[key] || {};
+    KLINE_CACHE[key] = {
+      bars: mergeCandles(old.bars, bars).slice(-2000),
+      checkedBucket: Math.max(Number(old.checkedBucket) || 0,
+                              Number(checkedBucket) || 0),
+      ts: nowMs()
+    };
+    var keys = Object.keys(KLINE_CACHE);
+    while (keys.length > 6) delete KLINE_CACHE[keys.shift()];
+    writeJSON('ct_kline', KLINE_CACHE);
+  }
+  function klineCacheMark(sym, iv, bucket) {
+    var key = klineKey(sym, iv), e = KLINE_CACHE[key];
+    if (!e) return;
+    e.checkedBucket = Math.max(Number(e.checkedBucket) || 0, Number(bucket) || 0);
+    e.ts = nowMs();
+    writeJSON('ct_kline', KLINE_CACHE);
+  }
+  function chartAnchorTs() {
+    if (!CANDLES.length) return null;
+    var idx = Math.round(CANDLES.length - VIEW.pan);
+    idx = Math.max(0, Math.min(CANDLES.length - 1, idx));
+    return CANDLES[idx].ts;
+  }
+  function chartReanchor(ts) {
+    if (ts === null || ts === undefined || !CANDLES.length) return;
+    var idx = 0;
+    while (idx < CANDLES.length - 1 && CANDLES[idx].ts < ts) idx++;
+    VIEW.pan = CANDLES.length - idx;
+    clampPan();
+  }
+  function restartKlineTimer() {
+    if (_klineTimer) { clearInterval(_klineTimer); _klineTimer = null; }
+    if (PAGE !== 'chart' || !CHART_SYMBOL) return;
+    _klineTimer = setInterval(function () {
+      if (PAGE === 'chart' && CHART_SYMBOL) loadChart(true);
+    }, refreshSeconds(CHART_INTERVAL) * 1000);
+  }
+  // 实时价推进当前周期：只在服务端最新根仍落后于当前桶时创建预览根。
+  // 预览根的 OHLC 全部来自真实报价，volume=0，绝不缓存、绝不冒充已完成 K 线。
+  function applyChartQuote(price, quoteTs) {
+    if (PAGE !== 'chart' || !CHART_SYMBOL || !CANDLES.length) return;
+    var anchor = chartAnchorTs(), p = Number(price);
+    if (!isFinite(p) || p <= 0) return;
+    var realLastTs = 0, i;
+    for (i = CANDLES.length - 1; i >= 0; i--) {
+      if (!CANDLES[i].preview) { realLastTs = CANDLES[i].ts; break; }
+    }
+    var f = klinePreviewFields(CHART_SYMBOL, CHART_INTERVAL, p, quoteTs);
+    var last = CANDLES[CANDLES.length - 1];
+    if (f && f.ts > realLastTs) {
+      if (last && last.preview && last.ts === f.ts) {
+        last.c = p; last.h = Math.max(last.h, p); last.l = Math.min(last.l, p);
+        last.quoteTs = f.quoteTs;
+      } else {
+        CANDLES = CANDLES.filter(function (c) { return !c.preview; });
+        CANDLES.push({ ts: f.ts, label: f.label, o: p, h: p, l: p, c: p,
+                       v: 0, preview: true, quoteTs: f.quoteTs });
+      }
+      $('chartNote').textContent = '当前 ' + CHART_INTERVAL +
+        ' 周期 · 实时报价预览（非已完成 K 线，无成交量）';
+    } else {
+      if (last && last.preview) {
+        CANDLES = CANDLES.filter(function (c) { return !c.preview; });
+        last = CANDLES[CANDLES.length - 1];
+      }
+      if (last) {
+        last.c = p; last.h = Math.max(last.h, p); last.l = Math.min(last.l, p);
+      }
+    }
+    chartReanchor(anchor);
+    drawChart();
+  }
+
+  function loadChart(refreshOnly) {
     // 每次进入都递增序号，使此前所有在途请求的回执立即失效。
     var seq = ++chartLoadSeq;
     var sym = CHART_SYMBOL, iv = CHART_INTERVAL;
+    var anchor = chartAnchorTs();
     if (isOnchain(sym)) {
       // 先尝试真实 DEX 历史 K 线（GeckoTerminal / CoinGecko）；拿到就画蜡烛，
       // 拿不到才回退到本设备真实报价采样折线，绝不画假 K 线。
-      $('chartNote').textContent = '正在加载链上历史 K 线（' + iv + '）…';
-      CANDLES = [];
-      drawChart();
+      if (!refreshOnly) {
+        $('chartNote').textContent = '正在加载链上历史 K 线（' + iv + '）…';
+        CANDLES = [];
+        drawChart();
+      }
       refreshOnchain([sym], true);   // 同时取一次真实报价快照（含首次兜底数据）
       fetchOnchainCandles(sym, iv).then(function (rows) {
         if (!chartLoadIsCurrent(seq, sym, iv)) return;
-        CANDLES = rows || [];
+        CANDLES = refreshOnly
+          ? mergeCandles(CANDLES, rows || []) : (rows || []);
         VIEW.count = clamp(VIEW.count || 90, 20, 400);
-        $('chartNote').textContent = '共 ' + CANDLES.length + ' 根真实 DEX K 线 · 左右拖动 · ＋/－ 缩放';
+        $('chartNote').textContent = CANDLES.length
+          ? '共 ' + CANDLES.length + ' 根真实 DEX K 线 · 左右拖动 · ＋/－ 缩放'
+          : '该链上标的暂无可用历史 K 线（显示真实报价走势）';
+        chartReanchor(anchor);
         drawChart();
       }).catch(function (e) {
         if (!chartLoadIsCurrent(seq, sym, iv)) return;
-        // 回退：本设备采集的真实报价走势（非 K 线，明确标注）
+        if (refreshOnly && CANDLES.length) return;   // 刷新失败保留旧真实数据
         CANDLES = [];
         drawOnchainFallbackNote();
         drawChart();
       });
       return;
     }
-    $('chartNote').textContent = '正在加载 ' + sym + ' K 线（' + iv + '）…';
-    CANDLES = [];
-    drawChart();
+    var cached = klineCacheGet(sym, iv);
+    if (!refreshOnly && cached) {
+      CANDLES = cached.slice();
+      $('chartNote').textContent = '本地缓存 ' + CANDLES.length + ' 根 · 校验更新中';
+      drawChart();
+    }
+    if (refreshOnly && klineCacheFresh(sym, iv) && CANDLES.length) {
+      drawChart();
+      return;
+    }
+    if (!refreshOnly) {
+      $('chartNote').textContent = '正在加载 ' + sym + ' K 线（' + iv + '）…';
+      CANDLES = [];
+      drawChart();
+    }
     fetchCandles(sym, iv).then(function (rows) {
       // 迟到 / 已切换品种或周期：丢弃，绝不触碰当前图表状态。
       if (!chartLoadIsCurrent(seq, sym, iv)) return;
-      CANDLES = rows || [];
+      CANDLES = refreshOnly
+        ? mergeCandles(CANDLES, rows || []) : (rows || []);
       VIEW.count = clamp(VIEW.count || 90, 20, 400);
       VIEW.pan = Number(VIEW.pan) || 0;   // 保留上次的自由位置（含右侧留白）
+      klineCachePut(sym, iv, CANDLES);
+      var bucket = klineBucketStart(nowSec(), iv, sym);
+      var newest = CANDLES.length ? CANDLES[CANDLES.length - 1].ts : 0;
+      if (newest < bucket) klineCacheMark(sym, iv, bucket);
       $('chartNote').textContent = CANDLES.length
         ? '共 ' + CANDLES.length + ' 根真实 K 线 · 左右拖动平移 · 双指或 ＋/－ 缩放'
         : '该品种暂无公开 K 线数据（数据源未返回）';
+      chartReanchor(anchor);
       drawChart();
     }).catch(function (e) {
       // 旧请求的失败也不能把当前新请求的界面改成「加载失败」。
       if (!chartLoadIsCurrent(seq, sym, iv)) return;
+      if (refreshOnly && CANDLES.length) return;
       $('chartNote').textContent = 'K 线加载失败：' + (e && e.message ? e.message : '网络异常') +
         ' · 点「最新」或切换周期重试';
       drawChart();
@@ -2716,10 +2981,16 @@
       if (!view[i]) continue;
       var r = view[i], x = X(i), col = r.c >= r.o ? UP : DOWN;
       g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 1;
+      // 预览根：半透明空心，明确区别于已完成的真实 K 线
+      g.globalAlpha = r.preview ? 0.55 : 1;
       g.beginPath(); g.moveTo(x, Y(r.h)); g.lineTo(x, Y(r.l)); g.stroke();
       var top = Math.min(Y(r.o), Y(r.c));
       var bh3 = Math.max(1, Math.abs(Y(r.o) - Y(r.c)));
-      g.fillRect(x - Math.max(1, bw * 0.32), top, Math.max(2, bw * 0.64), bh3);
+      if (r.preview) g.strokeRect(x - Math.max(1, bw * 0.32), top,
+        Math.max(2, bw * 0.64), bh3);
+      else g.fillRect(x - Math.max(1, bw * 0.32), top,
+        Math.max(2, bw * 0.64), bh3);
+      g.globalAlpha = 1;
     }
 
     // 主图指标线：MA / EMA / BOLL，天数由参数面板控制
@@ -3086,7 +3357,7 @@
 
   // ===================== 事件绑定 =====================
   function onListClick(e) {
-    if (Date.now() < _suppressClickUntil) { _suppressClickUntil = 0; return; }
+    if (nowMs() < _suppressClickUntil) { _suppressClickUntil = 0; return; }
     var el = e.target;
     while (el && el !== document.body) {
       if (el.getAttribute) {
@@ -3120,7 +3391,7 @@
       clearTimeout(lpTimer);
       lpTimer = setTimeout(function () {
         if (!lpMoved && lpSym) {
-          _suppressClickUntil = Date.now() + 800;
+          _suppressClickUntil = nowMs() + 800;
           showRowSheet(lpSym);
           lpSym = null;
         }
@@ -3222,6 +3493,7 @@
       CHART_INTERVAL = iv; CFG.chart_interval = iv; saveCfg();
       renderIntervals(intervalsFor(CHART_SYMBOL));
       loadChart();
+      restartKlineTimer();
     });
     // v38：不再提供 ＋/－ 缩放按钮，缩放完全交给双指捏合（zoomBy 保留给手势）；
     // 「最新」只复位平移，不改缩放倍数，避免误触把用户调好的视野重置掉。
@@ -3467,6 +3739,9 @@
     TICKER_ASOF = 0;
     writeJSON('ct_tickers', {});
     store.set('ct_tickers_asof', '0');
+    // K 线同样受保留期约束（此前只清 TICKERS，缓存会悄悄陈旧）
+    KLINE_CACHE = {};
+    writeJSON('ct_kline', KLINE_CACHE);
   }
   function boot() {
     applyTheme();
@@ -3493,6 +3768,15 @@
     restartTimer(false);
     measureHead();   // v38：DOM 填充完毕后量一次真实高度，供折叠动画用
   }
+  // 从后台切回：立即按当前周期边界校验一次，避免跨日后仍显示旧快照。
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && PAGE === 'chart') {
+      loadChart(true);
+      restartLiveTimer();
+      restartKlineTimer();
+    }
+  });
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
   } else boot();
@@ -3525,6 +3809,15 @@
     ocFetchGecko: ocFetchGecko, ocFetchCoingecko: ocFetchCoingecko,
     ocCacheKey: ocCacheKey, defaultInterval: defaultInterval,
     OC_STATUS: OC_STATUS, OC_KLINE_CACHE: OC_KLINE_CACHE,
+    // v1.6 K 线时间同步：周期边界 / 预览 / 自动刷新 / 缓存
+    klineBucketStart: klineBucketStart, klineNextBucket: klineNextBucket,
+    klineLabel: klineLabel, klineOffsetMs: klineOffsetMs,
+    refreshSeconds: refreshSeconds, klinePreviewFields: klinePreviewFields,
+    applyChartQuote: applyChartQuote, mergeCandles: mergeCandles,
+    klineCacheGet: klineCacheGet, klineCacheFresh: klineCacheFresh,
+    KLINE_CACHE: KLINE_CACHE,
+    restartKlineTimer: restartKlineTimer, chartAnchorTs: chartAnchorTs,
+    setNowMs: function (ms) { __nowMsOverride = (ms === null ? null : Number(ms)); },
     // v34：指标参数 / 搜索独立页 / 自由平移 / 图标
     normInd: normInd, indParams: indParams, writeIndParams: writeIndParams,
     resetIndParams: resetIndParams, maSeries: maSeries, emaSeries: emaSeries,
@@ -3549,6 +3842,7 @@
     setIntervalKey: function (k) { CHART_INTERVAL = k; },
     setSearch: function (q) { SEARCH_TEXT = String(q || ''); renderList(); },
     setChartSymbol: function (s) { CHART_SYMBOL = s; },
+    setPage: function (p) { PAGE = p; },
     setCandles: function (rows) { CANDLES = rows; },
     // K 线竞态回归：只读观测点（不改变行为）
     candles: function () { return CANDLES; },

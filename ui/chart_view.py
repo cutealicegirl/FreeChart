@@ -12,6 +12,8 @@
 - 画线（画完自动回光标，可选中后拖端点/整体平移二次调整）。
 """
 import math
+import time
+from bisect import bisect_left
 from datetime import datetime
 
 from PySide6.QtCore import (QEasingCurve, QEvent, QPoint, QPointF, QRect,
@@ -21,11 +23,11 @@ from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QPainter,
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
                                QVBoxLayout, QWidget)
 
-from core import indicator_params, onchain_history
+from core import indicator_params, kline_time as _kt, onchain_history
 from core.thread_cleanup import safe_stop_thread
 from data import kline_cache, onchain, onchain_kline
-from data.klines import (HistoryWorker, KlineWorker, default_interval,
-                         intervals_for, refresh_seconds)
+from data.klines import (Candle, HistoryWorker, KlineWorker,
+                         default_interval, intervals_for, refresh_seconds)
 from ui.theme import (C_ACCENT, C_BG_BASE, C_BG_HOVER, C_BG_PANEL,
                       C_BLUE, C_BORDER, C_DOWN, C_PURPLE, C_TEAL,
                       C_TEXT_DIM, C_TEXT_MAIN, C_TEXT_SUB, C_UP,
@@ -74,6 +76,11 @@ class CandleChart(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)   # 接收 ESC / Delete
         self.candles: list = []
+        # 真实已完成 K 线与“当前周期预览”分开保存：预览只来自真实报价，
+        # 成交量 0，不缓存、不参与 ATH/ATL 与历史分页。
+        self._real_candles: list = []
+        self._preview: Candle | None = None
+        self._anchor_ts: float | None = None
         # 链上合约品种：走「真实报价采样走势 + 链上结构图」绘制分支，
         # 不画不存在的 K 线。None = 普通蜡烛模式。
         self.onchain_view = None
@@ -94,6 +101,7 @@ class CandleChart(QWidget):
         # 否则后台每来一页历史都会把刚缩好的 K 线「弹」回最右侧 / 居中。
         self._view_touched = False
         self.interval = "15m"           # 当前周期（决定时间轴年份格式）
+        self.market_symbol = ""         # 决定该品种 K 线时区的标的符号
         # 实时最新价（ticker），光标涨跌幅的基准；None 时退回最后一根收盘
         self.last_price = None
         # 价格轴 / 指标数字的字号倍率（设置里可调，默认比旧版大 20%）
@@ -276,47 +284,130 @@ class CandleChart(QWidget):
         """
         return str(getattr(self, "interval", "")) in self.SR_PERIODS
 
+    def _right_edge_ts(self):
+        """当前视口右边缘对应的真实 K 线时间（用于跨数据更新锚定）。"""
+        if not self.candles:
+            return None
+        i = int(round(self._right_edge()))
+        i = max(0, min(len(self.candles) - 1, i))
+        return float(self.candles[i].ts)
+
+    def _align_right_edge_to_ts(self, ts: float):
+        """数据变多后仍让同一个时间点停在原来的屏幕位置。
+
+        旧实现视口按“倒数第几根”锚定，隔夜一次补 30 根就会把整图左移
+        30 格，视觉上表现为突然跳动。这里改成按时间戳锚定。
+        """
+        if ts is None or not self.candles:
+            return
+        tss = [c.ts for c in self.candles]
+        i = bisect_left(tss, float(ts))
+        i = max(0, min(len(self.candles) - 1, i))
+        self._pan = len(self.candles) - i
+        self._clamp_pan()
+
     def set_data(self, candles: list):
-        self._anim.stop()               # 数据整体换新，旧动画作废
+        """写入一批**真实** K 线；预览根单独维护，不污染历史数据。"""
+        old_len = len(self.candles)
+        anchor = self._right_edge_ts() if self.candles else self._anchor_ts
+        new_len_after = 0  # 填充后再按实际根数决定是否锚定
+        real = [c for c in (candles or [])
+                if not getattr(c, "preview", False)]
+        self._real_candles = real
+        if self._preview is not None:
+            # 服务端已返回当前桶（或更新的桶）：预览立即让位给真实数据
+            if not real or self._preview.ts > real[-1].ts:
+                pass
+            else:
+                self._preview = None
+        self.candles = list(real)
+        if self._preview is not None:
+            self.candles.append(self._preview)
+        new_len_after = len(self.candles)
+        self._anchor_ts = anchor
+        self._anim.stop()
+        self._anim_start = self._anim_target = 0.0
         # 数据一换，旧的全历史资格立即作废：切周期 / 切品种 / 合并缓存 /
         # 回溯分页后，先按「区间极值」处理，直到再次确认覆盖上市首根。
         self._extremes_trusted = False
-        self._heavy = len(candles) > 20000
-        self.candles = candles
+        self._heavy = len(real) > 20000
         self._recalc_indicators()
-        # 记录已加载历史中的最高/最低及其位置，供主图标注
-        if candles:
-            hi_i = max(range(len(candles)), key=lambda i: candles[i].high)
-            lo_i = min(range(len(candles)), key=lambda i: candles[i].low)
-            self._extremes = (hi_i, candles[hi_i].high,
-                              lo_i, candles[lo_i].low)
+        # 极值只看真实 K 线；预览的“当前价”绝不能冒充历史高低点。
+        if real:
+            hi_i = max(range(len(real)), key=lambda i: real[i].high)
+            lo_i = min(range(len(real)), key=lambda i: real[i].low)
+            self._extremes = (hi_i, real[hi_i].high,
+                              lo_i, real[lo_i].low)
         else:
             self._extremes = None
-        # 注意：不要把 _view_count 压到 len(candles)。否则短周期数据加载后
-        # 用户此前的缩放级别会被永久压缩，切回长周期时"只能放大不能缩小"。
         self._clamp_pan()
-        # 只有「尚未手动调过视野」的初始状态才自动居中；用户滚轮 / 拖动过
-        # 之后，后台补历史、切周期、切品种都不得再改他的视口位置。
-        if not self._view_touched:
+        # 只有“数据变多/等量更新”才按时间锚定；切到更短的历史时保持原视口，
+        # 否则旧右边缘时间根本不在新数据里，会被错误对齐到最早一根。
+        if (anchor is not None and not self.fit_all
+                and new_len_after >= old_len
+                and anchor <= self.candles[-1].ts):
+            self._align_right_edge_to_ts(anchor)
+        elif not self._view_touched:
+            # 只有「尚未手动调过视野」的初始状态才自动居中
             self._center_when_narrow()
         if self._selected not in self._lines:
             self._selected = None
             self._drag = None
         self.update()
 
-    # ---- 实时价 -> 最新 K 线动画 ----
-    def animate_last_price(self, price):
-        """实时价更新时，最新一根 K 线的收盘/高低随动画平滑伸缩。
+    def clear_preview(self):
+        """切品种 / 切周期时丢弃旧周期的预览根。"""
+        self._preview = None
+        self.candles = list(self._real_candles)
+        self._anim.stop()
+        self.update()
 
-        连续多个 tick 会从「当前动画值」重新起步，视觉上始终连贯：
-        上一次动画跑到一半就被新价打断时，从当前显示值继续插值，
-        不会回跳，所以每秒一次的外盘价也能呈现出连续爬升/回落。
+    # ---- 实时价 -> 当前周期预览 / 最新 K 线动画 ----
+    def animate_last_price(self, price, quote_ts: float = 0.0,
+                           symbol: str = "", interval: str = ""):
+        """用**真实报价**平滑推进当前周期，不伪造 OHLC/成交量。
+
+        * 若服务端最新根就在当前周期：只伸缩它的 close/high/low（旧行为）；
+        * 若系统时钟已越过旧根所在周期：创建一根 preview=True 的预览根，
+          open/high/low/close 都取该真实报价、volume=0，并明确标注来源。
+          它不会被写入缓存、不会被当成已完成 K 线或历史极值。
         """
-        if not self.candles or not price or price <= 0:
+        try:
+            target = float(price)
+        except (TypeError, ValueError):
             return
-        last = self.candles[-1]
+        if not math.isfinite(target) or target <= 0:
+            return
+
+        last_real_ts = self._real_candles[-1].ts \
+            if self._real_candles else 0.0
+        preview = self._preview
+        if symbol and interval:
+            fields = _kt.preview_fields(symbol, interval, target,
+                                        quote_ts=quote_ts)
+            if fields and fields["ts"] > last_real_ts:
+                if preview is None or abs(preview.ts - fields["ts"]) > 1e-6:
+                    preview = Candle(
+                        ts=fields["ts"], time_label=fields["label"],
+                        open=fields["open"], high=fields["high"],
+                        low=fields["low"], close=fields["close"],
+                        volume=0.0, preview=True,
+                        quote_ts=fields["quote_ts"],
+                        source=fields["source"])
+                    self._preview = preview
+                    self.candles = list(self._real_candles) + [preview]
+                    self._center_when_narrow()
+                    self.set_status(
+                        f"当前 {interval} 周期 · 实时报价预览"
+                        f"（非已完成 K 线，无成交量）")
+            else:
+                # 时钟还在服务端最新根所属周期内：不需要预览根
+                if preview is not None:
+                    self.clear_preview()
+        if not self.candles:
+            return
+        last = self._preview or self.candles[-1]
         start = float(last.close)
-        target = float(price)
         if abs(target - start) < 1e-12:
             return
         self._anim.stop()
@@ -330,9 +421,9 @@ class CandleChart(QWidget):
             return
         v = self._anim_start + (self._anim_target - self._anim_start) \
             * float(frac)
-        last = self.candles[-1]
+        last = self._preview or self.candles[-1]
         last.close = v
-        # 与真实行情一致：会话内高低点只向外扩张
+        # 与真实行情一致：会话内高低点只向外扩张（新根到来时自动复位）
         if v > last.high:
             last.high = v
         if v < last.low:
@@ -1456,14 +1547,21 @@ class CandleChart(QWidget):
             for i, c in enumerate(bars):
                 up = c.close >= c.open
                 color = QColor(C_UP if up else C_DOWN)
+                # 预览根半透明空心：与已完成 K 线视觉上明确区分
+                if getattr(c, "preview", False):
+                    color.setAlpha(140)
                 x = g["bar_x0"] + step * (i + 0.5)
                 painter.setPen(QPen(color, 1))
                 painter.drawLine(int(x), int(self._y_price(g, c.high)),
                                  int(x), int(self._y_price(g, c.low)))
                 top = self._y_price(g, max(c.open, c.close))
                 bottom = self._y_price(g, min(c.open, c.close))
-                painter.setBrush(color)
-                painter.setPen(Qt.NoPen)
+                if getattr(c, "preview", False):
+                    painter.setBrush(Qt.NoBrush)
+                else:
+                    painter.setBrush(color)
+                painter.setPen(Qt.NoPen if not getattr(c, "preview", False)
+                               else QPen(color, 1))
                 painter.drawRect(QRectF(x - body_w / 2, top,
                                         body_w, max(1.0, bottom - top)))
 
@@ -1844,8 +1942,8 @@ class CandleChart(QWidget):
             x += step
 
     def _axis_date(self, candle):
-        """时间轴标签：一律带年份，跨年/跨月一眼可辨。"""
-        d = datetime.fromtimestamp(candle.ts)
+        """时间轴标签：按市场时区（不是设备本地时区），带年份便于跨年辨识。"""
+        d = datetime.fromtimestamp(candle.ts, _kt.tz_for(self.market_symbol))
         if self.interval in ("1M", "month"):
             return d.strftime("%Y-%m")
         if self.interval in ("1y", "1year"):
@@ -1853,11 +1951,12 @@ class CandleChart(QWidget):
         return d.strftime("%Y-%m-%d")
 
     def _axis_full(self, candle):
-        """十字光标气泡：分钟线补上具体时刻。"""
-        d = datetime.fromtimestamp(candle.ts)
+        """十字光标气泡：分钟线补上具体时刻（同样按市场时区）。"""
+        d = datetime.fromtimestamp(candle.ts, _kt.tz_for(self.market_symbol))
         if self.interval in ("1M", "month", "1y", "1year"):
             return self._axis_date(candle)
-        if self.interval in ("1m", "5m", "15m", "30m", "1h", "4h",
+        if self.interval in ("1m", "5m", "15m", "30m", "1h", "2h",
+                             "4h", "6h", "12h",
                              "m1", "m5", "m15", "m30", "m60"):
             return d.strftime("%Y-%m-%d %H:%M")
         return d.strftime("%Y-%m-%d")
@@ -1961,6 +2060,9 @@ class ChartView(QWidget):
         self._interval = ""
         self._worker: KlineWorker | None = None
         self._hist_worker: HistoryWorker | None = None
+        # 请求版本：旧回执（跨周期 / 跨品种 / 跨日）不得覆盖当前数据
+        self._load_seq = 0
+        self._hist_seq = 0
         # 空响应确认计数：连续两拍空返回才认定「已回溯到上市首根」，
         # 防止限流 / 抖动的单次空页把区间极值冒充成 ATH / ATL
         self._hist_empty_streak = 0
@@ -2370,6 +2472,13 @@ class ChartView(QWidget):
         if hasattr(self, "_tools_hover_timer"):
             self._tools_hover_timer.start()
         self._position_tools()
+        # 从列表页切回图表：立即按当前周期边界校验一次，不等待下一个定时器
+        if (getattr(self, "_symbol", "")
+                and not getattr(self, "_no_kline", False)
+                and hasattr(self, "_refresh_timer")):
+            self._refresh_timer.start(
+                refresh_seconds(getattr(self, "_interval", "15m")) * 1000)
+            self._load()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2675,6 +2784,8 @@ class ChartView(QWidget):
             # 换品种前先接住上一个图表的缩放与位置
             self._view_state = self.chart.view_state()
         self._symbol = symbol
+        self.chart.market_symbol = symbol
+        self.chart.clear_preview()
         # 链上品种：先尝试真实 DEX 历史 K 线（data.onchain_kline，GeckoTerminal /
         # CoinGecko 真实 OHLCV）。取不到时才回退到「本设备真实报价采样」视图，
         # 绝不画假蜡烛。_onchain 表示「是链上标的」，_no_kline 表示「当前正在
@@ -2833,7 +2944,10 @@ class ChartView(QWidget):
             self._update_ticker(t)
         else:
             self.chart.last_price = float(price)
-            self.chart.animate_last_price(float(price))
+            # 到达本机的时间即为该报价的可信 as-of；不伪造交易所时间戳
+            self.chart.animate_last_price(
+                float(price), quote_ts=time.time(),
+                symbol=symbol, interval=self._interval)
 
     def stop_prefetch(self):
         """退出前收尾周期预加载线程，避免 QThread 析构崩溃。
@@ -2863,8 +2977,10 @@ class ChartView(QWidget):
     def _update_ticker(self, t):
         # 光标涨跌幅要用「当前市场价」做基准，不能用最后一根 K 线收盘价
         self.chart.last_price = t.last_price
-        # 最新 K 线随实时价平滑伸缩（涨 -> 蜡烛拔高，跌 -> 蜡烛缩短）
-        self.chart.animate_last_price(t.last_price)
+        # 最新 K 线随实时价平滑伸缩；若已跨周期则只推进“实时报价预览”
+        self.chart.animate_last_price(
+            t.last_price, quote_ts=float(getattr(t, "ts", 0) or time.time()),
+            symbol=self._symbol or "", interval=self._interval)
         color = C_UP if t.change_pct >= 0 else C_DOWN
         sign = "+" if t.change_pct >= 0 else ""
         price_text = with_unit(format_price(t.last_price), t.symbol,
@@ -2965,6 +3081,8 @@ class ChartView(QWidget):
     def _set_interval(self, key: str):
         self._interval = key
         self.chart.interval = key
+        self.chart.market_symbol = self._symbol or ""
+        self.chart.clear_preview()
         # 不同 K 线周期可以有不同的均线天数，切周期立即换用对应参数
         self._apply_indicator_params()
         # 记住这次选的周期，下次打开图表直接恢复
@@ -3015,7 +3133,8 @@ class ChartView(QWidget):
     def _load(self):
         if not self._symbol or getattr(self, "_no_kline", False):
             return     # 已回退到采样视图：不反复发注定失败的 K 线请求
-        # 缓存新鲜期内完全不发 K 线请求：每次浏览都是本地秒开
+        # 新鲜度由「周期边界 + 是否确认本桶无新根 + TTL」共同决定：
+        # 跨到新周期立即失效，不再等满 15 分钟。
         if kline_cache.is_fresh(self._symbol, self._interval):
             return
         if self._worker is not None:
@@ -3024,15 +3143,23 @@ class ChartView(QWidget):
                     return
             except RuntimeError:
                 self._worker = None
+        self._load_seq += 1
+        seq = self._load_seq
         self._worker = KlineWorker(self._symbol, self._interval, self)
-        self._worker.loaded.connect(self._on_loaded)
-        self._worker.failed.connect(self._on_failed)
+        # 只有最新序号的回执才被接受，防止旧请求在跨周期后覆盖新数据
+        self._worker.loaded.connect(
+            lambda s, i, c, sq=seq: self._on_loaded(s, i, c, sq))
+        self._worker.failed.connect(
+            lambda s, i, m, sq=seq: self._on_failed(s, i, m, sq))
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
-    def _on_loaded(self, symbol, interval, candles):
+    def _on_loaded(self, symbol, interval, candles,
+                   req_seq: int = -1):
         if symbol != self._symbol or interval != self._interval:
             return
+        if req_seq >= 0 and req_seq != self._load_seq:
+            return     # 过期回执：旧周期 / 旧品种数据不得覆盖当前图表
         if getattr(self, "_onchain", False) and candles:
             # 拿到真实 DEX OHLCV：确认退出采样兜底，恢复蜡烛绘制
             self._has_real_kline = True
@@ -3046,6 +3173,13 @@ class ChartView(QWidget):
             merged[c.ts] = c
         self.chart.set_data([merged[t] for t in sorted(merged)])
         kline_cache.save(symbol, interval, candles)
+
+        # 源返回的最新根仍在上一个桶（休市 / 无成交 / 边界刚过）：
+        # 明确记下“本桶已确认”，TTL 内不再重复请求，避免定时器空转。
+        bucket = kline_cache.expected_bucket(symbol, interval)
+        newest = max((c.ts for c in candles), default=0.0)
+        if newest < bucket:
+            kline_cache.mark_checked(symbol, interval, bucket)
         self.chart.history_loading = False
         self.lbl_error.hide()
         if self._show_all and not self.chart.history_exhausted:
@@ -3080,8 +3214,11 @@ class ChartView(QWidget):
         self.lbl_error.setText(tip + "\n当前显示本设备采集的真实报价走势")
         self.lbl_error.show()
 
-    def _on_failed(self, symbol, interval, msg):
+    def _on_failed(self, symbol, interval, msg,
+                   req_seq: int = -1):
         if symbol != self._symbol or interval != self._interval:
+            return
+        if req_seq >= 0 and req_seq != self._load_seq:
             return
         if getattr(self, "_onchain", False):
             # 真实 DEX K 线拿不到：回退采样折线（而非渲染空白或假数据）
@@ -3190,16 +3327,23 @@ class ChartView(QWidget):
         self.chart.history_loading = True
         self.chart.set_status(
             f"正在回溯更早历史… 已加载 {len(self.chart.candles):,} 根")
+        self._hist_seq += 1
+        seq = self._hist_seq
         worker = HistoryWorker(self._symbol, self._interval,
                                self.chart.candles[0].ts, self)
-        worker.loaded.connect(self._on_history)
-        worker.failed.connect(self._on_history_failed)
+        worker.loaded.connect(
+            lambda s, i, c, e, sq=seq: self._on_history(s, i, c, e, sq))
+        worker.failed.connect(
+            lambda s, i, m, sq=seq: self._on_history_failed(s, i, m, sq))
         worker.finished.connect(worker.deleteLater)
         self._hist_worker = worker
         worker.start()
 
-    def _on_history(self, symbol, interval, candles, exhausted):
+    def _on_history(self, symbol, interval, candles, exhausted,
+                    req_seq: int = -1):
         if symbol != self._symbol or interval != self._interval:
+            return
+        if req_seq >= 0 and req_seq != self._hist_seq:
             return
         self.chart.history_loading = False
         # 视野已越过「全部铺满」点（往半屏居中极限缩）时不回拉，
@@ -3218,7 +3362,7 @@ class ChartView(QWidget):
                 merged = sorted(older + self.chart.candles,
                                 key=lambda c: c.ts)
                 self.chart.set_data(merged)
-                kline_cache.save(symbol, interval, older)
+                kline_cache.save(symbol, interval, older, touch=False)
                 self._hist_empty_streak = 0    # 拿到更早数据：空页计数清零
                 if auto_fit:
                     self._fit_all_view()
@@ -3244,7 +3388,8 @@ class ChartView(QWidget):
             # 连当前 K 线都没有：无可回溯，按「未确认全历史」处理
             self.chart.set_history_exhausted(True, trusted=False)
         if self.chart._extremes_trusted:
-            kline_cache.save(symbol, interval, [], exhausted=True)
+            kline_cache.save(symbol, interval, [], exhausted=True,
+                             touch=False)
             self._stop_history_pump()
             if auto_fit:
                 self._fit_all_view()
@@ -3260,8 +3405,11 @@ class ChartView(QWidget):
                 "图上高低仅为该区间极值")
         self.chart.update()
 
-    def _on_history_failed(self, symbol, interval, msg):
+    def _on_history_failed(self, symbol, interval, msg,
+                           req_seq: int = -1):
         if symbol != self._symbol or interval != self._interval:
+            return
+        if req_seq >= 0 and req_seq != self._hist_seq:
             return
         self.chart.history_loading = False
         # 网络抖动不永久判死刑：停泵但保持可重试，滚轮继续缩小即可续上

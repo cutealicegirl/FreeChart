@@ -6,15 +6,15 @@
 
 所有请求走 api_base.HTTP 共享会话（绕过系统代理）。
 """
-import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List
 
 from PySide6.QtCore import QThread, Signal
 
 from data.api_base import HTTP, MarketApiError
 from data.tencent_stock_api import is_stock_symbol
+from core import kline_time as _kt
 from data import corporate_actions as _ca
 from data import price_adjustment as _pa
 from data import onchain as _onchain
@@ -23,7 +23,8 @@ from data import onchain_kline as _ock
 # 加密货币周期 -> Binance interval（3d/1w/1M 为 Binance 原生周期）
 CRYPTO_INTERVALS = [
     ("1分", "1m"), ("5分", "5m"), ("15分", "15m"), ("30分", "30m"),
-    ("1时", "1h"), ("4时", "4h"),
+    ("1时", "1h"), ("2时", "2h"), ("4时", "4h"),
+    ("6时", "6h"), ("12时", "12h"),
     ("日K", "1d"), ("3日", "3d"), ("周K", "1w"), ("月K", "1M"),
     ("年K", "1y"),
 ]
@@ -61,9 +62,25 @@ _TENCENT_PAGE = 640    # 腾讯单次最多返回根数（实测 >640 直接返�
 _HISTORY_PAGE = 1000   # Binance 往前翻页时每次拉取的根数
 
 
+def _prior_date_str(before_ts: float, symbol: str = "") -> str:
+    """按市场当地日历取 before_ts 的前一天，不再减固定 86400 秒。
+
+    DST 切换日（23/25 小时）与跨年边界用固定秒数会落到错误日期，
+    导致腾讯分页漏一根或重复一根。
+    """
+    tz = _kt.tz_for(symbol)
+    d = datetime.fromtimestamp(float(before_ts), tz).date()
+    return (d - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 @dataclass
 class Candle:
-    """一根 K 线。time_label 用于横轴显示，ts 用于排序。"""
+    """一根 K 线。time_label 用于横轴显示，ts 用于排序。
+
+    preview=True 表示这是由真实实时报价生成的“当前未完成周期”预览：
+    只有 close/high/low 来自实际报价，volume=0，绝不写缓存、绝不冒充
+    已完成 K 线，也绝不参与历史极值 / 回溯分页。
+    """
     ts: float            # Unix 时间戳（秒）
     time_label: str      # 横轴标签（如 14:25 或 11-07）
     open: float
@@ -71,6 +88,9 @@ class Candle:
     low: float
     close: float
     volume: float
+    preview: bool = False
+    quote_ts: float = 0.0
+    source: str = ""
 
 
 # ============ 公司行为复权集成 ============
@@ -155,35 +175,37 @@ def default_interval(symbol: str) -> str:
 
 
 def refresh_seconds(interval: str) -> int:
-    """图表页自动刷新间隔（秒）：分钟线 10s，日线及以上 60s。"""
-    if interval in ("1h", "4h", "m30", "m60"):
+    """图表页自动刷新间隔（秒）：按周期长度分档，不再按周期键硬编码。
+
+    10s：<=30m；30s：1h~6h；60s：12h 及以上。缓存层会再按“周期边界”
+    决定是否真的发请求，定时器空转不再造成 15 分钟滞后。
+    """
+    sec = _kt.interval_seconds(interval)
+    if sec <= 0:
+        return 10
+    if sec <= 1800:
+        return 10
+    if sec <= 21600:
         return 30
-    return 60 if interval in ("day", "1d", "3d", "1w", "1M", "1y",
-                              "3day", "week", "month", "1year") else 10
+    return 60
 
 
-def _aggregate(candles: List[Candle], mode: str) -> List[Candle]:
+def _aggregate(candles: List[Candle], mode: str,
+               symbol: str = "") -> List[Candle]:
     """把基础周期 K 线聚合为 3日/周/月/年 K。
 
-    按"桶起始日期"分组：3日=连续3天一段，周=自然周（周一），
-    月=自然月，年=自然年。OHLC 取组内首开/最高/最低/末收，量求和。
+    桶起点统一由 core.kline_time 按市场时区计算：
+    加密 UTC 日历 / A 股与港股 UTC+8 / 美股美东时区。
+    OHLC 取组内首开、最高、最低、末收，成交量求和；不产生新价格。
     """
-    from datetime import timedelta
-
     if not candles:
         return []
-    groups: dict = {}          # 桶起始 date -> 累积数据
-    order: list = []           # 保持时间顺序
+    interval = {"3day": "3day", "week": "week", "month": "month",
+                "year": "1year"}.get(mode, mode)
+    groups: dict = {}          # 桶起点 ts -> 累积数据
+    order: list = []
     for c in candles:
-        d = datetime.fromtimestamp(c.ts).date()
-        if mode == "3day":
-            start = d - timedelta(days=d.toordinal() % 3)
-        elif mode == "week":
-            start = d - timedelta(days=d.weekday())       # 回到本周周一
-        elif mode == "month":
-            start = d.replace(day=1)
-        else:                                            # year
-            start = d.replace(month=1, day=1)
+        start = _kt.bucket_start(c.ts, interval, symbol)
         if start not in groups:
             groups[start] = {
                 "open": c.open, "high": c.high, "low": c.low,
@@ -195,14 +217,11 @@ def _aggregate(candles: List[Candle], mode: str) -> List[Candle]:
             g["low"] = min(g["low"], c.low)
             g["close"] = c.close
             g["volume"] += c.volume
-    fmt = {"3day": "%m-%d", "week": "%m-%d",
-           "month": "%Y-%m", "year": "%Y"}[mode]
     out: List[Candle] = []
     for start in order:
         g = groups[start]
         out.append(Candle(
-            ts=datetime(start.year, start.month, start.day).timestamp(),
-            time_label=start.strftime(fmt),
+            ts=start, time_label=_kt.label_for(start, interval, symbol),
             open=g["open"], high=g["high"], low=g["low"],
             close=g["close"], volume=g["volume"]))
     return out
@@ -255,7 +274,7 @@ def _fetch_crypto(symbol: str, interval: str) -> List[Candle]:
     # 年K：Binance 无原生年线，用月线（1M）聚合
     if interval == "1y":
         monthly = _fetch_crypto_raw(symbol, "1M", _HISTORY_PAGE)
-        return _aggregate(monthly, "year")
+        return _aggregate(monthly, "year", symbol)
 
     valid = {iv for _, iv in CRYPTO_INTERVALS}
     if interval not in valid:
@@ -310,12 +329,8 @@ def _fetch_crypto_raw(symbol: str, interval: str, limit: int,
     for row in rows:
         try:
             ts = row[0] / 1000.0
-            if interval == "1M":
-                label = datetime.fromtimestamp(ts).strftime("%Y-%m")
-            elif interval in ("1d", "3d", "1w"):
-                label = datetime.fromtimestamp(ts).strftime("%m-%d")
-            else:
-                label = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+            # 标签与市场时区、周期桶同源（加密 = UTC），不再用进程本地时区
+            label = _kt.label_for(ts, interval, symbol)
             candles.append(Candle(
                 ts=ts, time_label=label,
                 open=float(row[1]), high=float(row[2]),
@@ -339,7 +354,7 @@ def _fetch_us(symbol: str, interval: str) -> List[Candle]:
     code = symbol[3:].lower()            # US:AAPL -> aapl
     if interval in STOCK_AGG:
         daily = _postprocess(symbol, _fetch_us_daily(code), "raw")
-        return _aggregate(daily, STOCK_AGG[interval])
+        return _aggregate(daily, STOCK_AGG[interval], symbol)
     if interval == "day":
         return _postprocess(symbol, _fetch_us_daily(code), "raw")
     sina_type = _US_SINA_TYPE.get(interval, "5")
@@ -360,8 +375,9 @@ def _fetch_us(symbol: str, interval: str) -> List[Candle]:
         try:
             # 字段：d 时间 / o 开 / h 高 / l 低 / c 收 / v 量
             dt = datetime.strptime(row["d"], "%Y-%m-%d %H:%M:%S")
+            ts = _kt.naive_to_timestamp(dt, symbol)
             candles.append(Candle(
-                ts=dt.timestamp(), time_label=dt.strftime("%m-%d %H:%M"),
+                ts=ts, time_label=_kt.label_for(ts, interval, symbol),
                 open=float(row["o"]), high=float(row["h"]),
                 low=float(row["l"]), close=float(row["c"]),
                 volume=float(row.get("v") or 0)))
@@ -390,8 +406,10 @@ def _fetch_us_daily(code: str) -> List[Candle]:
     for row in rows[-_AGG_BASE_LIMIT:]:
         try:
             dt = datetime.strptime(row["d"], "%Y-%m-%d")
+            us_symbol = "US:" + code.upper()
+            ts = _kt.naive_to_timestamp(dt, us_symbol)
             candles.append(Candle(
-                ts=dt.timestamp(), time_label=dt.strftime("%m-%d"),
+                ts=ts, time_label=_kt.label_for(ts, "day", us_symbol),
                 open=float(row["o"]), high=float(row["h"]),
                 low=float(row["l"]), close=float(row["c"]),
                 volume=float(row.get("v") or 0)))
@@ -409,7 +427,7 @@ def _fetch_stock(symbol: str, interval: str) -> List[Candle]:
     # 周/月/3日/年 K：由（已复权的）日线本地聚合，口径与日线一致
     if interval in STOCK_AGG:
         daily = _fetch_stock(symbol, "day")
-        return _aggregate(daily, STOCK_AGG[interval])
+        return _aggregate(daily, STOCK_AGG[interval], symbol)
     valid = {"m1", "m5", "m15", "m30", "m60", "day"}
     if interval not in valid:
         interval = "day"
@@ -420,7 +438,7 @@ def _fetch_stock(symbol: str, interval: str) -> List[Candle]:
     else:
         param = f"{code},{interval},,,{_LIMIT}"
     rows = _tencent_rows(param, code, interval)
-    candles = _parse_stock_rows(rows, interval)
+    candles = _parse_stock_rows(rows, interval, symbol)
     if not candles:
         raise MarketApiError("腾讯K线返回为空")
     # 腾讯日线 qfq 已前复权价格，但成交量仍是原始份额 -> 只补成交量；
@@ -447,8 +465,12 @@ def _tencent_rows(param: str, code: str, interval: str,
     return rows
 
 
-def _parse_stock_rows(rows: list, interval: str) -> List[Candle]:
-    """腾讯 K 线行 -> Candle。字段：[时间, 开, 收, 高, 低, 量, ...]。"""
+def _parse_stock_rows(rows: list, interval: str,
+                      symbol: str = "") -> List[Candle]:
+    """腾讯 K 线行 -> Candle。字段：[时间, 开, 收, 高, 低, 量, ...]。
+
+    源时间是交易所当地墙钟（无时区），统一按市场时区解释，不再依赖进程时区。
+    """
     candles: List[Candle] = []
     for row in rows:
         try:
@@ -458,12 +480,11 @@ def _parse_stock_rows(rows: list, interval: str) -> List[Candle]:
                     dt = datetime.strptime(raw_t, "%Y-%m-%d")
                 except ValueError:
                     dt = datetime.strptime(raw_t, "%Y%m%d")
-                label = dt.strftime("%m-%d")
-                ts = time.mktime(dt.timetuple())
+                ts = _kt.naive_to_timestamp(dt, symbol)
             else:
                 dt = datetime.strptime(raw_t, "%Y%m%d%H%M")
-                label = dt.strftime("%m-%d %H:%M")
-                ts = dt.timestamp()
+                ts = _kt.naive_to_timestamp(dt, symbol)
+            label = _kt.label_for(ts, interval, symbol)
             candles.append(Candle(
                 ts=ts, time_label=label,
                 open=float(row[1]), high=float(row[3]),
@@ -474,37 +495,39 @@ def _parse_stock_rows(rows: list, interval: str) -> List[Candle]:
     return candles
 
 
-def _hk_daily_rows(code: str, end_date: str = "") -> List[Candle]:
+def _hk_daily_rows(code: str, end_date: str = "",
+                   symbol: str = "") -> List[Candle]:
     """港股日线：腾讯 hkfqkline（qfqday / day）。"""
     param = (f"{code},day,,{end_date},{_TENCENT_PAGE},qfq" if end_date
              else f"{code},day,,,{_TENCENT_PAGE},qfq")
     rows = _tencent_rows(param, code, "day", _HK_KLINE_URL)
-    return _parse_stock_rows(rows, "day")
+    hk_symbol = symbol or ("HK:" + code[2:] if code.startswith("hk") else "")
+    return _parse_stock_rows(rows, "day", hk_symbol)
 
 
 def _fetch_hk(symbol: str, interval: str) -> List[Candle]:
     """港股 K 线：日线直取，周/月/3日/年 K 由日线本地聚合。"""
     code = symbol.replace(":", "").lower()      # HK:00700 -> hk00700
-    daily = _hk_daily_rows(code)
+    daily = _hk_daily_rows(code, symbol=symbol)
     if not daily:
         raise MarketApiError("港股K线返回为空")
     # hkfqkline qfq 已前复权价格，只补成交量
     daily = _postprocess(symbol, daily, "source_qfq", price_already_adjusted=True)
     if interval in STOCK_AGG:
-        return _aggregate(daily, STOCK_AGG[interval])
+        return _aggregate(daily, STOCK_AGG[interval], symbol)
     return daily
 
 
 def _fetch_hk_before(symbol: str, interval: str,
                      before_ts: float) -> List[Candle]:
     code = symbol.replace(":", "").lower()
-    end_date = datetime.fromtimestamp(before_ts - 86400).strftime("%Y-%m-%d")
-    daily = _hk_daily_rows(code, end_date)
+    end_date = _prior_date_str(before_ts, symbol)
+    daily = _hk_daily_rows(code, end_date, symbol)
     if not daily:
         return []
     daily = _postprocess(symbol, daily, "source_qfq", price_already_adjusted=True)
     if interval in STOCK_AGG:
-        agg = _aggregate(daily, STOCK_AGG[interval])
+        agg = _aggregate(daily, STOCK_AGG[interval], symbol)
         if agg:
             agg = agg[:-1]        # 页尾不完整桶留到下一页凑齐
         return [c for c in agg if c.ts < before_ts]
@@ -522,15 +545,15 @@ def _fetch_stock_before(symbol: str, interval: str,
     if interval in ("m1", "m5", "m15", "m30", "m60") or before_ts <= 0:
         return []
     code = symbol.replace(":", "").lower()
-    end_date = datetime.fromtimestamp(before_ts - 86400).strftime("%Y-%m-%d")
+    end_date = _prior_date_str(before_ts, symbol)
     rows = _tencent_rows(f"{code},day,,{end_date},{_TENCENT_PAGE},qfq",
                          code, "day")
-    daily = _parse_stock_rows(rows, "day")
+    daily = _parse_stock_rows(rows, "day", symbol)
     if not daily:
         return []
     daily = _postprocess(symbol, daily, "source_qfq", price_already_adjusted=True)
     if interval in STOCK_AGG:
-        agg = _aggregate(daily, STOCK_AGG[interval])
+        agg = _aggregate(daily, STOCK_AGG[interval], symbol)
         # 页尾那一桶很可能只含半个周期，留到下一页凑齐再生成
         if agg:
             agg = agg[:-1]
@@ -570,7 +593,7 @@ def fetch_klines_before(symbol: str, interval: str, before_ts: float,
     if interval == "1y":
         monthly = _fetch_crypto_raw(symbol, "1M", limit,
                                    end_time_ms=end_ms, allow_empty=True)
-        candles = [c for c in _aggregate(monthly, "year")
+        candles = [c for c in _aggregate(monthly, "year", symbol)
                    if c.ts < before_ts]
         return candles, not candles
     valid = {iv for _, iv in CRYPTO_INTERVALS if iv != "1y"}

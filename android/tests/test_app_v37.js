@@ -100,7 +100,7 @@ ok('3. APK 包名与版本号未破坏升级',
   read(path.join(ANDROID, 'AndroidManifest.xml'))
     .indexOf('package="com.cryptoticker.app"') >= 0 &&
   read(path.join(ANDROID, 'AndroidManifest.xml'))
-    .indexOf('android:versionName="1.3.0"') >= 0);
+    .indexOf('android:versionName="1.5.0"') >= 0);
 
 // ---------- 2. 资料库内容 ----------
 const DB = global.ABOUT_DB;

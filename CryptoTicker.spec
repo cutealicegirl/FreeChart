@@ -17,7 +17,7 @@ a = Analysis(
            ('data/corporate_actions.json', 'data')],
     hiddenimports=['core.shortcut', 'core.live_feed', 'core.indicator_params',
                    'core.onchain_history', 'core.brand', 'core.indicators',
-                   'core.thread_cleanup',
+                   'core.thread_cleanup', 'core.kline_time',
                    'ui.units', 'ui.mascot', 'ui.indicator_sheet',
                    'ui.info_panel', 'ui.detail_dialog', 'data.fundamentals',
                    'data.contract_search', 'data.onchain', 'data.onchain_kline',

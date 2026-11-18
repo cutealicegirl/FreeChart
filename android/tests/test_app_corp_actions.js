@@ -74,7 +74,7 @@ console.log('=== Android 公司行为复权回归 ===\n');
 // candle 场：{ts,label,o,h,l,c,v}
 function mk(dateStr, c, v) {
   const [Y, M, Dd] = dateStr.split('-').map(Number);
-  return { ts: new Date(Y, M - 1, Dd).getTime() / 1000, label: dateStr,
+  return { ts: Date.UTC(Y, M - 1, Dd) / 1000, label: dateStr,
     o: c, h: c, l: c, c: c, v: v };
 }
 

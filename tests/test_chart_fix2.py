@@ -147,9 +147,15 @@ print(f"4. 时间轴 OK：{len(labels)} 个标签，全部落在 "
       f"[{g['bottom']:.0f}, {chart.height()}] 独立区域内")
 
 # ================= 5. 价格范围包含布林轨 =================
+# 本节只验证价格轴几何；先把视口复位到最新，避免上一节的时间戳锚定
+# 把视口停在序列最前端（那里 BOLL 尚未形成，没有可校验的轨线）。
+chart.reset_view()
 chart.show_boll = True
 g2 = chart._geom()
-upper_visible = [v for v in chart._ind["boll"][0][g2["offset"]:]
+# 视口现在按时间戳锚定，右端不一定等于最后一根；只校验**可见区间**内的
+# 布林轨，否则会把视口之外的高价误判为「被裁切」。
+upper_visible = [v for v in chart._ind["boll"][0][
+                     g2["offset"]:g2["offset"] + g2["n"]]
                  if v is not None]
 assert g2["hi"] >= max(upper_visible), "布林上轨超出价格范围会被裁掉"
 chart.show_boll = False

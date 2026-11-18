@@ -180,11 +180,18 @@ ok("月K 合并所有日", abs(monthly[0].volume - 565) < 1e-9)
 # ---------- 9. 缓存失效 ----------
 print("\n[9] 缓存 schema / 指纹失效")
 import data.kline_cache as kc
+from core import kline_time as _kt
+from dataclasses import replace as _dc_replace
 tmp = tempfile.mkdtemp()
 old_appdata = os.environ.get("APPDATA")
 os.environ["APPDATA"] = tmp
 kc._local.__dict__.clear()
-kc.save("US:AAPL", "day", candles)
+# v4 缓存新鲜度以「当前周期桶」为准；测试用的 2020 年样本必须整体平移到
+# 当前日桶，否则会被正确判定为过期，无法验证 schema / 指纹本身。
+_shift = int(_kt.bucket_start(__import__("time").time(), "day", "US:AAPL")) \
+    - candles[-1].ts
+_fresh = [_dc_replace(c, ts=c.ts + _shift) for c in candles]
+kc.save("US:AAPL", "day", _fresh)
 ok("新缓存 fresh", kc.is_fresh("US:AAPL", "day"))
 conn = kc._conn(); conn.execute("UPDATE meta SET schema='v1-old'"); conn.commit()
 ok("旧 schema 失效", not kc.is_fresh("US:AAPL", "day"))

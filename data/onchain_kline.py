@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from data import onchain
+from core import kline_time as _kt
 from data.api_base import HTTP, MarketApiError
 
 # ---------------- 数据源配置 ----------------
@@ -55,14 +56,16 @@ _NETWORK_HINTS = {
 _GT_TF = {
     "1m": ("minute", 1), "5m": ("minute", 5),
     "15m": ("minute", 15), "30m": ("minute", 30),
-    "1h": ("hour", 1), "4h": ("hour", 4),
+    "1h": ("hour", 1), "2h": ("hour", 2), "4h": ("hour", 4),
+    "6h": ("hour", 6), "12h": ("hour", 12),
     "1d": ("day", 1), "3d": ("day", 3),
     "1w": ("week", 1), "1M": ("month", 1),
 }
-# 周期 → 聚合最小来源周期与桶大小（秒），供备源与本地聚合使用
+# 周期 -> 桶秒数；仅作兼容 / 校验，真正的边界统一由 core.kline_time 计算
 _TF_SECONDS = {
     "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
-    "1h": 3600, "4h": 14400, "1d": 86400, "3d": 259200,
+    "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600,
+    "12h": 43200, "1d": 86400, "3d": 259200,
     "1w": 604800, "1M": 2592000,
 }
 # CoinGecko 平台名候选
@@ -70,7 +73,8 @@ _CG_PLATFORM = {"Solana": "solana", "Tron": "tron", "EVM": "ethereum"}
 
 ONCHAIN_INTERVALS = [
     ("1分", "1m"), ("5分", "5m"), ("15分", "15m"), ("30分", "30m"),
-    ("1时", "1h"), ("4时", "4h"),
+    ("1时", "1h"), ("2时", "2h"), ("4时", "4h"),
+    ("6时", "6h"), ("12时", "12h"),
     ("日K", "1d"), ("3日", "3d"), ("周K", "1w"), ("月K", "1M"),
 ]
 _LIMIT = 1000
@@ -79,15 +83,18 @@ _RESOLVE_TIMEOUT = 4.0        # 单次池解析超时（不可达时快速失败
 _OHLCV_TIMEOUT = 6.0          # 单次 OHLCV 请求超时
 _TOTAL_BUDGET = 15.0          # 单次 fetch_ohlcv 全链路总预算（秒），防止卡死
 
+# 单一时钟入口：测试可替换 _now 来模拟跨边界 / 超时，无需引入 freezegun
+_now = time.time
+
 
 class _Deadline:
     """一次取数的全局时间预算；超时后所有后续网络请求直接跳过。"""
 
     def __init__(self, seconds: float):
-        self.end = time.time() + seconds
+        self.end = _now() + seconds
 
     def left(self) -> float:
-        return self.end - time.time()
+        return self.end - _now()
 
     def ok(self) -> bool:
         return self.left() > 0.4
@@ -127,7 +134,7 @@ def last_status(symbol: str) -> dict:
 def _set_status(symbol: str, state: str, source: str, count: int = 0,
                 message: str = ""):
     _STATUS[symbol] = {"state": state, "source": source, "count": count,
-                       "ts": time.time(), "message": message}
+                       "ts": _now(), "message": message}
 
 
 # ---------------- 交易池解析（含迁移重解析） ----------------
@@ -194,7 +201,7 @@ def _resolve_pool(address: str, allow_cached: bool = True,
     cache = _load_pool_cache()
     hit = cache.get(address)
     if (allow_cached and isinstance(hit, dict)
-            and time.time() - float(hit.get("ts") or 0) < _POOL_TTL
+            and _now() - float(hit.get("ts") or 0) < _POOL_TTL
             and hit.get("network") and hit.get("pool")):
         return hit
 
@@ -208,7 +215,7 @@ def _resolve_pool(address: str, allow_cached: bool = True,
             if resp.status_code == 200:
                 found = _pick_pool_from_payload(resp.json() or {})
                 if found:
-                    found["ts"] = time.time()
+                    found["ts"] = _now()
                     cache[address] = found
                     _save_pool_cache(cache)
                     return found
@@ -229,7 +236,7 @@ def _resolve_pool(address: str, allow_cached: bool = True,
                 continue
             found = _pick_pool_from_payload(resp.json() or {})
             if found:
-                found["ts"] = time.time()
+                found["ts"] = _now()
                 cache[address] = found
                 _save_pool_cache(cache)
                 return found
@@ -240,16 +247,13 @@ def _resolve_pool(address: str, allow_cached: bool = True,
 
 # ---------------- 标准化清洗 ----------------
 def _fmt_label(ts: float, interval: str) -> str:
-    from datetime import datetime
-    if interval in ("1M",):
-        return datetime.fromtimestamp(ts).strftime("%Y-%m")
-    if interval in ("1d", "3d", "1w"):
-        return datetime.fromtimestamp(ts).strftime("%m-%d")
-    return datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+    # DEX 数据源按 UTC 分桶，标签同源，不能用设备本地时区
+    return _kt.label_for(ts, interval, "ONCHAIN:UTC")
 
 
 def normalize(rows: list, interval: str,
-              volume_reliable: bool = True) -> List[Bar]:
+              volume_reliable: bool = True,
+              market: str = "crypto") -> List[Bar]:
     """把 [ts, o, h, l, c, v] 原始行标准化为真实 K 线列表。
 
     - ts 自动识别秒/毫秒/微秒并统一为秒
@@ -281,8 +285,11 @@ def normalize(rows: list, interval: str,
         if v < 0 or v != v:
             continue
         if interval in _TF_SECONDS:
-            # 把时间对齐到周期桶起点，避免源端边界漂移导致的重复/错位
-            ts = int(ts // _TF_SECONDS[interval]) * _TF_SECONDS[interval]
+            # 统一走 core.kline_time：UTC 自然周 / 自然月，不再用 604800、
+            # 2592000 这类固定秒桶（会导致月K从周四起、30天一月）。
+            pseudo = "crypto" if market == "crypto" else (
+                "US:X" if market == "us" else "SH:X")
+            ts = _kt.bucket_start(ts, interval, pseudo)
         out.append({"ts": ts, "o": o, "h": h, "l": l, "c": c, "v": v})
     if not out:
         return []
@@ -297,26 +304,18 @@ def normalize(rows: list, interval: str,
 
 
 def _aggregate(bars: List[Bar], interval: str) -> List[Bar]:
-    """把分钟/小时/日线聚合成 3d/1w/1M 等更大周期（仅用真实基础 K 线）。
+    """把分钟/小时/日线聚合成更大周期（仅用真实基础 K 线）。
 
-    仅当源不支持目标周期时才用；聚合不产生新价格，只用桶内真实 OHLC。
+    桶起点统一由 core.kline_time 计算（DEX=UTC 自然周 / 自然月），
+    输出 ts 是桶起点而不是组内首根的真实 ts，避免跨月跨年错位。
+    聚合不产生新价格，只用桶内真实 OHLC。
     """
-    from datetime import datetime
     if not bars:
         return []
     groups: dict = {}
     for b in bars:
-        d = datetime.fromtimestamp(b.ts)
-        if interval == "3d":
-            key = (d.year, d.timetuple().tm_yday // 3)
-        elif interval == "1w":
-            iso = d.isocalendar()
-            key = (iso[0], iso[1])
-        elif interval == "1M":
-            key = (d.year, d.month)
-        else:
-            return bars
-        g = groups.setdefault(key, {"ts": b.ts, "o": b.open, "h": b.high,
+        key = _kt.bucket_start(b.ts, interval, "ONCHAIN:UTC")
+        g = groups.setdefault(key, {"ts": key, "o": b.open, "h": b.high,
                                     "l": b.low, "c": b.close, "v": b.volume,
                                     "vr": b.volume_reliable})
         g["h"] = max(g["h"], b.high)
@@ -325,8 +324,9 @@ def _aggregate(bars: List[Bar], interval: str) -> List[Bar]:
         g["v"] += b.volume
         g["vr"] = g["vr"] and b.volume_reliable
     out = []
-    for _, g in sorted(groups.items(), key=lambda kv: kv[1]["ts"]):
-        out.append(Bar(ts=g["ts"], time_label=_fmt_label(g["ts"], interval),
+    for key in sorted(groups):
+        g = groups[key]
+        out.append(Bar(ts=key, time_label=_fmt_label(key, interval),
                        open=g["o"], high=g["h"], low=g["l"], close=g["c"],
                        volume=g["v"], volume_reliable=g["vr"]))
     return out
@@ -381,7 +381,7 @@ def _fetch_coingecko(address: str, interval: str, limit: int,
     platform = _CG_PLATFORM.get(onchain.chain_of(address), "solana")
     # CoinGecko 只提供 1 日 OHLC 粒度，days 控制长度；按回溯时间换算天数
     if before_ts and before_ts > 0:
-        days = max(2, min(365, int((time.time() - before_ts) / 86400) + 2))
+        days = max(2, min(365, int((_now() - before_ts) / 86400) + 2))
     else:
         days = 365
     resp = HTTP.get(_CG_OHLC.format(platform=platform, addr=address),

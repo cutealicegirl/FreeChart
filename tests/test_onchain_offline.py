@@ -84,7 +84,10 @@ try:
     ock.HTTP.get = lambda *a, **k: R({"data": [
         {"id": "solana_offlinePool", "attributes": {"reserve_in_usd": "100000"}}]})
     ock._resolve_pool(SOL)
-    gt_rows = [[1700000000 + i * 3600, 10+i, 12+i, 9+i, 11+i, 100+i]
+    # 缓存新鲜度现在按“周期边界”判断：用当前 1h 桶构造真实时间数据，
+    # 固定 2023 年旧时间戳本就应判为过期（防止隔夜滞后）。
+    base = int(time.time() // 3600 * 3600)
+    gt_rows = [[base - (3 - i) * 3600, 10+i, 12+i, 9+i, 11+i, 100+i]
                for i in range(4)]
     ock.HTTP.get = lambda *a, **k: R({"data": {"attributes": {"ohlcv_list": gt_rows}}})
     bars = ock.fetch_ohlcv(SYM, "1h")

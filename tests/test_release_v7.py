@@ -77,11 +77,22 @@ kline_cache.clear()
 calls = []
 
 
+from core import kline_time as _kt
+import time as _time
+
+_REF_NOW = _time.time()
+
+
 def fake_fetch(symbol, interval):
     calls.append((symbol, interval))
     if symbol == "BAD":
         raise RuntimeError("offline")
-    return make_candles(25)
+    # v4 缓存按周期桶判新鲜；末根对齐当前桶，才能验证写盘后确实 fresh。
+    out = make_candles(25)
+    shift = int(_kt.bucket_start(_REF_NOW, interval, symbol)) - out[-1].ts
+    for c in out:
+        c.ts += shift
+    return out
 
 
 small_queue = [("BTC", "15m"), ("BTC", "1d"), ("BAD", "1d"),

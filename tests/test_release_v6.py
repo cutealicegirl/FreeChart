@@ -147,10 +147,17 @@ with patch.object(ChartView, "_load_history", lambda self: None):
 assert cv.chart.fit_all and cv._show_all and cv._hist_timer.isActive()
 cv._stop_history_pump()
 # 本地缓存：save -> is_fresh -> load -> take_before -> exhausted
-kline_cache.save("BTC", "1d", make_candles(50))
+# v4 缓存按周期桶判新鲜：样本末根必须落在当前日桶，否则会被正确判过期。
+from core import kline_time as _kt
+_fresh = make_candles(50)
+_shift = int(_kt.bucket_start(__import__("time").time(), "1d", "BTC")) \
+    - _fresh[-1].ts
+for _c in _fresh:
+    _c.ts += _shift
+kline_cache.save("BTC", "1d", _fresh)
 assert kline_cache.is_fresh("BTC", "1d")
 assert len(kline_cache.load("BTC", "1d")) == 50
-assert len(kline_cache.take_before("BTC", "1d", 1600000000 + 40 * 86400)) > 0
+assert len(kline_cache.take_before("BTC", "1d", _fresh[40].ts)) > 0
 assert not kline_cache.is_exhausted("BTC", "1d")
 kline_cache.save("BTC", "1d", [], exhausted=True)
 assert kline_cache.is_exhausted("BTC", "1d")
