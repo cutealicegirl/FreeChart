@@ -128,6 +128,14 @@ class Config:
                         self._data[k] = saved[k]
         except (OSError, ValueError):
             pass  # 文件不存在或 JSON 损坏 -> 使用默认配置
+        # 搜索历史数据结构升级：旧版纯字符串数组 -> 资产对象数组。
+        # 纯函数归一（去重 / 补字段 / 截断），配置损坏也不会抛异常。
+        try:
+            from core import asset_search
+            self._data["search_history"] = asset_search.normalize_history(
+                self._data.get("search_history"))
+        except Exception:
+            self._data["search_history"] = []
 
     def save(self):
         """保存配置到磁盘。"""

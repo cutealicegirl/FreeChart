@@ -11,6 +11,7 @@
 import sys
 import threading
 import time
+import html
 
 if sys.platform == "win32":
     import ctypes.wintypes as _cwin    # 无边框窗口原生边缘缩放（WM_NCHITTEST）
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QHBoxLayout,
 
 from core.autostart import set_enabled as set_autostart
 from core.config import DEFAULT_SYMBOLS, Config
-from core import brand, onchain_history
+from core import brand, onchain_history, asset_search
 from core.live_feed import LiveFeed
 from core.thread_cleanup import _ORPHAN_THREADS
 from core.updater import RefreshScheduler, SearchWorker
@@ -546,6 +547,9 @@ class MainWindow(QMainWindow):
         self._force_quit = False
         self._search_worker = None
         self._contract_worker = None
+        # 统一搜索：请求序号，旧回执（旧关键词/过期结果）不得覆盖最新结果
+        self._search_seq = 0
+        self._active_search_query = ""
         self._prefetch = None     # 后台 K 线历史预缓存线程（由 main.py 启动）
         # ---- 链上合约品种（无 K 线，但可收藏 / 看真实链上报价）----
         # 元数据落盘：重启后自选行仍显示代币代码与名称，而不是 44 位地址。
@@ -683,11 +687,12 @@ class MainWindow(QMainWindow):
         self.search_panel.open_requested.connect(self._on_search_open)
         self.search_panel.back_requested.connect(self._close_search_page)
         self.search_panel.history_picked.connect(self._on_history_pick)
+        self.search_panel.history_deleted.connect(self._on_history_deleted)
         self.search_panel.history_cleared.connect(self._on_history_cleared)
         self._search_debounce = QTimer(self)
         self._search_debounce.setInterval(350)
         self._search_debounce.setSingleShot(True)
-        self._search_debounce.timeout.connect(self._do_search)
+        self._search_debounce.timeout.connect(lambda: self._do_search(True))
         self.edit_search.textEdited.connect(
             lambda _: self._search_debounce.start())
         # 阶段 3：搜索框同时是列表筛选器；排序 / 切页都不清空它
@@ -2131,27 +2136,36 @@ class MainWindow(QMainWindow):
         self._sync_info_panel(force=True)
 
     # ================= 搜索 =================
-    def _do_search(self):
+    def _do_search(self, from_timer=False):
+        # 防抖/重试是「用户仍在搜索上下文」才成立的假设。用户点结果进了
+        # 图表页后，这些延时回调必须放弃，否则旧回执会把图表页拉回搜索页。
+        if from_timer and self.stack.currentWidget() is self.chart_view:
+            self._search_seq += 1
+            self._active_search_query = ""
+            return
         query = self.edit_search.text().strip()
+        # 统一搜索：每次真正发起查询都递增序号；空查询也让在途回执全部失效。
+        # 防抖期间用户继续输入时，旧 worker 的回执不得覆盖最新结果。
+        self._search_seq += 1
+        seq = self._search_seq
+        self._active_search_query = query
         if not query:
-            # 空关键词：已在搜索页时展示搜索历史（保留最近 100 条）
+            # 空关键词：已在搜索页时展示搜索历史（保留最近 50 条）
             if self.stack.currentWidget() is self.search_panel:
                 self._show_search_history()
             else:
                 self._close_search_page()
             return
-        self._record_search_history(query)
-        # 链上合约地址：解析代币代码/链/价格，命中行情源即可加入自选
+        # 链上合约地址：合约地址优先精确解析（名称搜索由统一搜索覆盖）
         if is_contract(query):
             if self._contract_worker is not None:
                 try:
                     if self._contract_worker.isRunning():
-                        QTimer.singleShot(220, self._do_search)
+                        QTimer.singleShot(220, lambda: self._do_search(True))
                         return
                 except RuntimeError:
                     self._contract_worker = None
-            self.search_panel.show_results(
-                [], set(self.rows), note="正在解析链上合约地址…")
+            self.search_panel.show_loading("正在解析链上合约地址…")
             self._open_search_page()
             cw = ContractWorker(query, self)
             cw.resolved.connect(self._on_contract_result)
@@ -2162,27 +2176,55 @@ class MainWindow(QMainWindow):
         if self._search_worker is not None:
             try:
                 if self._search_worker.isRunning():
-                    QTimer.singleShot(200, self._do_search)
+                    QTimer.singleShot(200, lambda: self._do_search(True))
                     return
             except RuntimeError:
                 self._search_worker = None
-        worker = SearchWorker(self.market, query, self)
+        # 加载中状态与「无结果 / 网络失败」明确区分；先备好内容，结果回来再切页
+        self.search_panel.show_loading(
+            f"正在搜索「{html.escape(query)}」：股票 / CEX / 链上代币…")
+        worker = SearchWorker(self.market, query, seq, self)
         worker.results.connect(self._on_search_results)
+        worker.failed.connect(self._on_search_failed)
         worker.finished.connect(self._on_search_done)
         self._search_worker = worker
         worker.start()
 
     def _on_search_done(self):
-        self._search_worker = None
+        worker = self.sender()
+        if worker is self._search_worker:
+            self._search_worker = None
         try:
-            self.sender().deleteLater()
+            worker.deleteLater()
         except (RuntimeError, AttributeError):
             pass
 
-    def _on_search_results(self, results):
-        if not self.edit_search.text().strip():
+    def _on_search_results(self, results, req_seq=-1):
+        """统一搜索回执：过期序号 / 空查询 / 关键词已变 / 已进图表一律丢弃。"""
+        if self.stack.currentWidget() is self.chart_view:
+            return
+        if req_seq != -1 and req_seq != self._search_seq:
+            return
+        query = self.edit_search.text().strip()
+        if not query or query != self._active_search_query:
             return
         self.search_panel.show_results(results, set(self.rows))
+        self._open_search_page()
+        # 只有真正有命中才记录，失败 / 无结果 / 空输入不写历史。
+        if results:
+            self._record_search_history(query)
+
+    def _on_search_failed(self, message, req_seq=-1):
+        """网络失败 / 数据源不可用：明确报错，不记录历史、不伪装成无结果。"""
+        if self.stack.currentWidget() is self.chart_view:
+            return
+        if req_seq != -1 and req_seq != self._search_seq:
+            return
+        if not self.edit_search.text().strip():
+            return
+        self.search_panel.show_error(
+            "网络或数据源不可用，本次搜索未完成",
+            f"原因：{message}。请检查网络后重试；已收藏品种与缓存行情不受影响。")
         self._open_search_page()
 
     def _on_contract_result(self, info):
@@ -2265,8 +2307,13 @@ class MainWindow(QMainWindow):
             suffix += " · 当前无公开报价，稍后自动重试"
         self.search_panel.show_results(
             [item], set(self.rows), note + suffix)
+        # 合约解析成功 → 记录为资产对象历史（身份 = chain + address）
+        self._record_search_history(asset_search.make_hit(
+            sym_oc, label=label, name=(info.get("name") or label),
+            asset_type=asset_search.ASSET_ONCHAIN, market=chain,
+            chain=chain, address=addr, query=cur))
 
-    # ---- 搜索页导航 / 搜索历史（阶段 8） -------------------------------
+    # ---- 搜索页导航 / 搜索历史（阶段 8 起 v2 资产对象） ------------------
     def _on_search_button(self):
         """工具条搜索按钮：聚焦搜索框；有内容立即搜索，无内容看历史。"""
         self.edit_search.setFocus()
@@ -2293,35 +2340,55 @@ class MainWindow(QMainWindow):
         self.title_bar.set_page("行情", False)
 
     def _show_search_history(self):
+        # 配置里可能仍是旧版纯字符串，归一后交给搜索页渲染（资产类型/链/市场）
         self.search_panel.show_history(
             list(self.config.get("search_history") or []))
 
-    SEARCH_HISTORY_MAX = 100
+    SEARCH_HISTORY_MAX = asset_search.HISTORY_MAX   # 50：与 Android / 共享模型一致
 
-    def _record_search_history(self, query: str):
-        """搜索历史：最近优先、去重、最多保留 100 条。"""
-        query = query.strip()
-        if not query:
-            return
-        hist = [h for h in (self.config.get("search_history") or [])
-                if str(h) != query]
-        hist.insert(0, query)
-        hist = hist[:self.SEARCH_HISTORY_MAX]
+    def _record_search_history(self, entry):
+        """记录一次**成功**搜索（资产对象或关键词）：按 asset_id 去重、
+        重复移至最前、上限 50。空 / 失败 / 无结果由调用方保证不进来。
+        """
+        hist = asset_search.record_history(
+            self.config.get("search_history") or [], entry,
+            max_items=self.SEARCH_HISTORY_MAX)
         self.config.set("search_history", hist)
         self.config.save()
+        if (self.stack.currentWidget() is self.search_panel
+                and getattr(self.search_panel, "_mode", "") == "history"):
+            self._show_search_history()
 
     def _on_search_open(self, item: dict):
-        """点击搜索结果行 → 进入该品种图表（不默认加入自选）。"""
+        """点击搜索结果行 → 进入该品种图表（不默认加入自选）；同时把
+        历史从「关键词」升级为带身份的资产对象，便于下次一键打开。
+        """
+        self._record_search_history(item)
         self._open_chart(str(item.get("symbol") or ""))
 
-    def _on_history_pick(self, text: str):
-        """点击历史条目 → 填入搜索框并重新搜索。"""
-        self.edit_search.setText(text)
+    def _on_history_pick(self, entry):
+        """点击历史：有资产身份 → 直接打开；旧关键词 → 回填并重新搜索。"""
+        sym = asset_search.history_symbol(entry)
+        if sym:
+            self._record_search_history(entry)   # 重复使用，移至最前
+            self._open_chart(sym)
+            return
+        query = asset_search.history_query(entry)
+        self.edit_search.setText(query)
         self._search_debounce.stop()
         self._do_search()
 
+    def _on_history_deleted(self, entry):
+        """单条删除：按 asset_id，不用显示文本（同名资产可跨链共存）。"""
+        key = entry.get("id") if isinstance(entry, dict) else entry
+        hist = asset_search.delete_history(
+            self.config.get("search_history") or [], key)
+        self.config.set("search_history", hist)
+        self.config.save()
+        self._show_search_history()
+
     def _on_history_cleared(self):
-        self.config.set("search_history", [])
+        self.config.set("search_history", asset_search.clear_history())
         self.config.save()
         self._show_search_history()
 

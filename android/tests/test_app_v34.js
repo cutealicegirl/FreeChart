@@ -261,16 +261,28 @@ D.go('search');
 ok('6. 搜索是独立页面（与行情列表不同层）',
   D.page() === 'search' && el('pageSearch').hidden === false &&
   el('pageList').hidden === true);
+// 搜索历史已升级为「资产对象」模型（任务书四）：保存名称/类型/市场/链、按唯一 id 去重、上限 50
+D.clearSearchHistory();
 D.submitSearch('BTC');
-ok('6. 提交搜索写入历史', D.cfg.search_history[0] === 'BTC');
+ok('6. 提交搜索写入历史（对象化 query/label）',
+  typeof D.cfg.search_history[0] === 'object' &&
+  D.historyQuery(D.cfg.search_history[0]) === 'BTC');
 ok('6. 结果行点击进图表', el('searchBody').innerHTML.indexOf('data-search-open') >= 0);
 const before = D.cfg.symbols.slice();
 D.openSearchResult('ETH');
 ok('6. 点击结果不默认收藏', D.page() === 'chart' &&
   D.cfg.symbols.length === before.length);
+ok('6. 点击结果把具体资产写入历史（含 symbol 可直接打开）',
+  D.historySymbol(D.cfg.search_history[0]) === 'ETH');
+// 只在确认搜索时记录、按 id 去重、移至最前、上限 50（30~50 条要求）
 for (let i = 0; i < 120; i++) D.recordSearchHistory('Q' + i);
-ok('6. 搜索历史最多 100 条且最新在前', D.cfg.search_history.length === 100 &&
-  D.cfg.search_history[0] === 'Q119');
+ok('6. 搜索历史最多 50 条且最新在前', D.cfg.search_history.length === 50 &&
+  D.historyQuery(D.cfg.search_history[0]) === 'Q119');
+const delId = D.cfg.search_history[0].id;
+D.deleteHistory(delId);
+ok('6. 单条删除按资产唯一 id 生效',
+  D.cfg.search_history.length === 49 &&
+  D.cfg.search_history.every(function (x) { return x.id !== delId; }));
 D.go('search');
 D.clearSearchHistory();
 ok('6. 清空历史生效', D.cfg.search_history.length === 0 &&
@@ -281,8 +293,12 @@ D.renderList();
 ok('6. 合约结果不再叠在行情列表上',
   el('list').innerHTML.indexOf('data-addcontract') < 0 &&
   D.contractHitHTML(OC).indexOf('data-search-open') >= 0);
+// 系统返回：从明确的上级页面下钻再返回，优先回到上一级（导航栈语义）
+D.goWith('list', { resetStack: true });
+D.goWith('search');
 D.back();
-ok('6. 系统返回从搜索页回行情', D.page() === 'list');
+ok('6. 系统返回从搜索页回上一级行情', D.page() === 'list');
+ok('6. 首页(根层级)不显示返回箭头', D.backBtnHidden() === true);
 
 console.log('\n=== 结果: ' + pass + ' 通过 / ' + fail + ' 失败 ===');
 process.exit(fail ? 1 : 0);

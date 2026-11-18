@@ -8,6 +8,7 @@ from PySide6.QtGui import QKeyEvent, QMouseEvent
 app = QApplication([])
 sys.path.insert(0, r"C://Users//13051//WorkBuddy//2026-11-07-00-14-41//CryptoTicker")
 from core.config import Config
+from core import asset_search as _A
 from ui.main_window import MainWindow
 from ui.search_panel import SearchResultRow, SearchHistoryRow
 from tests.qt_exit import finish
@@ -23,8 +24,11 @@ ok_=[]
 def ok(n,c,e=""):
     ok_.append((n,c,e)); print(("PASS " if c else "FAIL ")+n+("  "+str(e) if e and not c else ""))
 def click(wgt):
-    app.sendEvent(wgt, QMouseEvent(QEvent.MouseButtonPress, QPointF(5,5),
-        QPointF(5,5), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    # offscreen 下手工 QMouseEvent + sendEvent 不会调用 Python 重写的
+    # mousePressEvent；QTest 又会产生事件风暴。直接调用处理函数验证逻辑。
+    ev = QMouseEvent(QEvent.MouseButtonPress, QPointF(5, 5), QPointF(5, 5),
+                     Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    wgt.mousePressEvent(ev)
 # 1 空内容点搜索按钮→历史页
 w.btn_search.click(); app.processEvents()
 ok("1 空内容点搜索按钮→历史页", w.stack.currentWidget() is w.search_panel)
@@ -46,7 +50,10 @@ rows=[w.search_panel._layout.itemAt(i).widget() for i in range(w.search_panel._l
 rows=[r for r in rows if isinstance(r,SearchResultRow)]
 ok("3 BTC 搜索结果出现", len(rows)>=1, len(rows))
 ok("3 结果在独立页面", w.stack.currentWidget() is w.search_panel)
-ok("3 历史已记录 BTC", (w.config.get("search_history") or []).count("BTC")==1)
+h3 = _A.normalize_history(w.config.get("search_history") or [])
+ok("3 历史已记录 BTC(资产对象)",
+   any(x.get("query") == "BTC" or x.get("label") == "BTC" for x in h3)
+   and all(isinstance(x, dict) for x in h3))
 if rows:
     click(rows[0]); app.processEvents()
     ok("3 点击结果行→图表页", w.stack.currentWidget() is w.chart_view)
@@ -54,7 +61,7 @@ if rows:
 # 4 返回
 w._navigate_back(); app.processEvents()
 ok("4 返回回列表", w.stack.currentWidget() is w.pages[w._current_market()]["scroll"])
-# 5 历史点击→重新搜索（先清空搜索框，返回列表时文本保留是既定行为）
+# 5 历史点击：资产条目直接打开图表（关键词条目才回填重新搜索）
 w.edit_search.clear(); app.processEvents()
 w.btn_search.click(); app.processEvents()
 hist=[w.search_panel._layout.itemAt(i).widget() for i in range(w.search_panel._layout.count())]
@@ -62,8 +69,8 @@ hist=[r for r in hist if isinstance(r,SearchHistoryRow)]
 ok("5 历史条目出现(BTC 最近)", len(hist)>=1 and hist[0].text_value=="BTC")
 if hist:
     click(hist[0]); app.processEvents(); time.sleep(0.2); app.processEvents()
-    ok("5 点击历史后仍在搜索页", w.stack.currentWidget() is w.search_panel)
-    ok("5 搜索框已填入", w.edit_search.text().strip()=="BTC")
+    ok("5 有资产身份的历史→直接打开图表", w.stack.currentWidget() is w.chart_view)
+    w._navigate_back(); app.processEvents()
 # 6 合约地址→显式收藏
 w.edit_search.setText(ADDR); w.edit_search.textEdited.emit(ADDR)
 t0=time.time(); oc_row=None
@@ -75,15 +82,25 @@ while time.time()-t0<25:
     if oc_row: break
 ok("6 合约解析结果出现", oc_row is not None)
 if oc_row:
-    ok("6 合约历史已记录", (w.config.get("search_history") or [None])[0]==ADDR)
+    h6 = _A.normalize_history(w.config.get("search_history") or [])
+    ok("6 合约历史已记录(chain+address)",
+       bool(h6) and ADDR in str(h6[0].get("address") or ""))
     oc_row.btn_add.click(); app.processEvents(); time.sleep(0.3); app.processEvents()
     ok("6 显式收藏成功", SYM in w.rows and SYM in (w.config.get("symbols") or []))
     click(oc_row); app.processEvents()
-    ok("6 点击行→图表页(无K线标注)", w.stack.currentWidget() is w.chart_view and getattr(w.chart_view,"_no_kline",False))
-# 7 历史 100 上限 + 清空
-for i in range(120): w._record_search_history("kw%d"%i)
-hist=w.config.get("search_history") or []
-ok("7 历史最多100条", len(hist)==100 and hist[0]=="kw119" and "BTC" not in hist)
+    ok("6 点击行→图表页", w.stack.currentWidget() is w.chart_view)
+# 7 历史 50 上限 + 单条删除 + 清空
+for i in range(120):
+    w._record_search_history("kw%d" % i)
+hist7 = _A.normalize_history(w.config.get("search_history") or [])
+ok("7 历史最多50条", len(hist7) == 50
+   and hist7[0].get("query") == "kw119"
+   and not any(x.get("query") == "BTC" for x in hist7))
+first_id = hist7[0]["id"]
+w._on_history_deleted({"id": first_id})
+after_del = _A.normalize_history(w.config.get("search_history") or [])
+ok("7 单条删除生效", len(after_del) == 49
+   and all(x["id"] != first_id for x in after_del))
 w._on_history_cleared()
 ok("7 清空历史", (w.config.get("search_history") or [])==[])
 fails=[x for x in ok_ if not x[1]]

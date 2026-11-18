@@ -234,19 +234,26 @@ class RefreshScheduler(QObject):
 
 
 class SearchWorker(QThread):
-    """搜索联想的后台线程：输入变化后异步执行，避免阻塞输入框。"""
+    """统一搜索联想的后台线程：输入变化后异步执行，避免阻塞输入框。
 
-    # 成功：发送结果列表 [{symbol, name, kind}]
-    results = Signal(list)
-    failed = Signal(str)
+    结果经 data.unified_search 归一为统一资产 hit（股票/CEX/链上同一
+    数据模型），并携带 query_id；旧请求回执不得覆盖新输入的结果。
+    """
 
-    def __init__(self, manager, query: str, parent=None):
+    # 成功：发送 (结果列表 [{symbol,name,kind,asset_type,...}], query_id)
+    results = Signal(list, int)
+    failed = Signal(str, int)
+
+    def __init__(self, manager, query: str, query_id: int = 0, parent=None):
         super().__init__(parent)
         self._manager = manager
         self._query = query
+        self._query_id = query_id
 
     def run(self):
         try:
-            self.results.emit(self._manager.search(self._query))
+            from data import unified_search
+            hits = unified_search.unified_search(self._query, self._manager)
+            self.results.emit(hits, self._query_id)
         except Exception as e:  # 搜索失败静默降级
-            self.failed.emit(str(e))
+            self.failed.emit(str(e), self._query_id)

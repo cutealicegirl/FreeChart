@@ -60,7 +60,11 @@
   var PREFETCH_ROWS = 60;      // 预取一页，滚动无缝
   var MAX_REFRESH_SYMBOLS = 300;
   var MAX_RETRY = 3;
-  var MAX_SEARCH_HISTORY = 100;   // 与桌面一致：只保留最近 100 条
+  var MAX_SEARCH_HISTORY = 50;    // 与桌面一致：最近 30~50 条，按资产唯一标识去重
+  // 长按手势参数（任务书：从 500~650ms / 8~12dp 起测，集中配置便于真机微调）
+  var LONG_PRESS_MS = 560;        // 长按触发延迟，默认 560ms
+  var LONG_PRESS_SLOP = 10;       // 移动容差(CSS px，约 10dp)
+  var HISTORY_VERSION = 2;        // 搜索历史数据结构版本（1 = 旧版纯字符串）
   var META_TTL = 7 * 86400 * 1000;
   var MISSING = '— 暂无公开数据';
 
@@ -106,6 +110,35 @@
   // ===================== 小工具 =====================
   // ===================== 链上合约品种工具 =====================
   var OC_PREFIX = 'ONCHAIN:';
+  // 内置链上代币索引（与桌面 data/contract_search.py KNOWN 同口径）：
+  // 名称 / 别名 / Symbol 离线可搜，身份用 chain + 合约地址，不靠名称合并。
+  // 地址为公开可查的权威合约；数据不足的字段一律不编造。
+  var OC_TOKENS = [
+    { sym: 'BONK', name: 'Bonk', chain: 'Solana', cat: 'Meme',
+      address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', aliases: ['bonk'] },
+    { sym: 'WIF', name: 'dogwifhat', chain: 'Solana', cat: 'Meme',
+      address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm', aliases: ['dogwifhat'] },
+    { sym: 'PEPE', name: 'Pepe', chain: 'Ethereum', cat: 'Meme',
+      address: '0x6982508145454Ce325DdbE47a25d4eC3d2311933', aliases: ['pepe'] },
+    { sym: 'FARTCOIN', name: 'Fartcoin', chain: 'Solana', cat: 'Meme',
+      address: '9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump', aliases: ['fartcoin'] },
+    { sym: 'POPCAT', name: 'Popcat', chain: 'Solana', cat: 'Meme',
+      address: '7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr', aliases: ['popcat'] },
+    { sym: 'BRETT', name: 'Based Brett', chain: 'Base', cat: 'Meme',
+      address: '0x532f27101965dd16442E59d40670FaF5eBB142E4', aliases: ['based brett'] },
+    { sym: 'JUP', name: 'Jupiter', chain: 'Solana', cat: 'DeFi',
+      address: 'JUPyiwrYJSkMiCe5P2iVit39ILjNmJ7kLo4wtGdwyrp', aliases: ['jupiter'] },
+    { sym: 'RAY', name: 'Raydium', chain: 'Solana', cat: 'DeFi',
+      address: '4k3Dyjzvzp8eMZWUXBbcjEvWSkkk59S5iCNLY3QrkX6R', aliases: ['raydium'] },
+    { sym: 'UNI', name: 'Uniswap', chain: 'Ethereum', cat: 'DeFi',
+      address: '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984', aliases: ['uniswap'] },
+    { sym: 'LINK', name: 'Chainlink', chain: 'Ethereum', cat: 'DeFi',
+      address: '0x514910771AF9Ca656af840dff83E8264ECf986CA', aliases: ['chainlink'] },
+    { sym: 'WLD', name: 'Worldcoin', chain: 'Optimism', cat: 'AI',
+      address: '0x163f8C2467924be0ae7B5347228CABF26031875387', aliases: ['worldcoin'] },
+    { sym: 'USDC', name: 'USD Coin (Solana)', chain: 'Solana', cat: 'Stablecoin',
+      address: 'EPjFWdd5AufqSSqeM2qQN1xzybapC8G4wEGGkZwyTDt1v', aliases: [] }
+  ];
   var OC_SOURCE = 'Rugcheck.xyz 链上代币报告';
   var RE_EVM = /^0x[0-9a-fA-F]{40}$/;
   var RE_TRON = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
@@ -132,6 +165,193 @@
   function ocCode(s) {
     var m = (CFG.onchain || {})[s] || {};
     return m.code || shortAddr(ocAddr(s));
+  }
+
+  // ===== 统一资产身份 / 搜索结果适配 / 搜索历史 =====
+  // 与桌面 core/asset_search.py 同口径：chain id + address 为链上唯一标识，
+  // 禁止仅凭名称/Symbol 合并；两端一致性由 test_unified_asset_search.py 与
+  // android/tests/test_app_unified_search.js 共同保证。
+  var CHAIN_IDS = {
+    solana: 'solana', sol: 'solana', ethereum: 'eth', eth: 'eth', erc20: 'eth',
+    base: 'base', 'bnb chain': 'bsc', bnbchain: 'bsc', bsc: 'bsc', bnb: 'bsc',
+    arbitrum: 'arb', 'arbitrum one': 'arb', optimism: 'op',
+    polygon: 'polygon', matic: 'polygon', avalanche: 'avax', avax: 'avax',
+    sui: 'sui', ton: 'ton', tron: 'tron', evm: 'evm'
+  };
+  function chainId(c) {
+    var k = String(c == null ? '' : c).trim().toLowerCase();
+    return CHAIN_IDS[k] || k;
+  }
+  function normQ(s) {
+    return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+  function assetId(h) {
+    if (typeof h === 'string') return 'q:' + normQ(h);
+    h = h || {};
+    var t = h.asset_type || '', addr = String(h.address || '').trim();
+    if (t === 'onchain' && addr) {
+      var a = addr.toLowerCase().indexOf('0x') === 0 ? addr.toLowerCase() : addr;
+      return (chainId(h.chain || h.chain_id || '') || 'unknown') + ':' + a;
+    }
+    var sym = String(h.symbol || '').trim();
+    if (sym) return (String(h.market || '').trim() || 'na') + ':' + sym;
+    return 'q:' + normQ(h.query || h.label || '');
+  }
+  function makeHit(o) {
+    o = o || {};
+    var h = {
+      symbol: String(o.symbol || ''), label: String(o.label || o.symbol || ''),
+      name: String(o.name || ''), asset_type: o.asset_type || '',
+      market: o.market || '', chain: o.chain || '', address: o.address || '',
+      logo: o.logo || '', query: o.query || '', aliases: o.aliases || []
+    };
+    if (o.kind) h.kind = o.kind;
+    if (o.price !== undefined) h.price = o.price;
+    h.id = assetId(h);
+    return h;
+  }
+  function relevance(q, h) {
+    q = normQ(q);
+    if (!q) return 0;
+    if (typeof h === 'string') h = { symbol: h, label: h };
+    var sym = normQ(h.symbol), code = normQ(h.label),
+        addr = normQ(h.address), name = normQ(h.name);
+    if (addr && q === addr) return 200;               // 合约地址精确优先
+    if (q === sym || q === code) return 100;
+    if (q === name) return 95;
+    if (code.indexOf(q) === 0 || sym.indexOf(q) === 0) return 80;
+    if (name.indexOf(q) === 0) return 70;
+    var al = h.aliases || [], i;
+    for (i = 0; i < al.length; i++) {
+      var na = normQ(al[i]);
+      if (na === q) return 65;
+      if (na.indexOf(q) === 0) return 55;
+    }
+    if (code.indexOf(q) >= 0 || sym.indexOf(q) >= 0 || name.indexOf(q) >= 0) return 40;
+    for (i = 0; i < al.length; i++) if (normQ(al[i]).indexOf(q) >= 0) return 30;
+    return 0;
+  }
+  function mergeHits(groups, q, limit) {
+    var best = {}, order = 0, g, j;
+    for (g = 0; g < (groups || []).length; g++) {
+      var arr = groups[g] || [];
+      for (j = 0; j < arr.length; j++) {
+        var h = arr[j];
+        if (!h) continue;
+        var score = relevance(q, h);
+        if (score <= 0) continue;
+        var hid = h.id || assetId(h);
+        var cand = { score: score, order: order, hit: h, id: hid };
+        order++;
+        var prev = best[hid];
+        if (!prev || score > prev.score) best[hid] = cand;
+      }
+    }
+    var list = [];
+    for (var k in best) if (Object.prototype.hasOwnProperty.call(best, k)) list.push(best[k]);
+    list.sort(function (x, y) { return (y.score - x.score) || (x.order - y.order); });
+    var out = [];
+    for (var i2 = 0; i2 < list.length; i2++) {
+      var c = list[i2], hh = {};
+      for (var kk in c.hit) if (Object.prototype.hasOwnProperty.call(c.hit, kk)) hh[kk] = c.hit[kk];
+      hh.relevance = c.score; hh.id = c.id;
+      out.push(hh);
+    }
+    return (limit && limit > 0) ? out.slice(0, limit) : out;
+  }
+  function normalizeHistory(raw) {
+    var out = [], seen = {}, items = Array.isArray(raw) ? raw : [], i;
+    for (i = 0; i < items.length; i++) {
+      var it = items[i], h;
+      if (typeof it === 'string') {
+        var q = it.trim();
+        if (!q) continue;
+        h = { query: q, label: q, symbol: '', name: '', asset_type: '',
+              market: '', chain: '', logo: '', ts: 0, id: 'q:' + normQ(q) };
+      } else if (it && typeof it === 'object') {
+        h = {
+          query: it.query || it.label || it.symbol || '',
+          label: it.label || it.query || '', symbol: it.symbol || '',
+          name: it.name || '', asset_type: it.asset_type || '',
+          market: it.market || '', chain: it.chain || '', logo: it.logo || '',
+          ts: it.ts || 0, id: it.id || assetId(it)
+        };
+        if (!h.id) continue;
+      } else continue;
+      h.v = HISTORY_VERSION;
+      if (seen[h.id]) continue;
+      seen[h.id] = 1; out.push(h);
+    }
+    return out;
+  }
+  function recordHistory(entry, nowArg) {
+    var items = normalizeHistory(CFG.search_history || []), e;
+    if (typeof entry === 'string') {
+      var q = entry.trim();
+      if (!q) return items;
+      e = { query: q, label: q, symbol: '', name: '', asset_type: '',
+            market: '', chain: '', logo: '', id: 'q:' + normQ(q) };
+    } else if (entry && typeof entry === 'object') {
+      e = {
+        query: entry.query || entry.label || entry.symbol || '',
+        label: entry.label || entry.query || '', symbol: entry.symbol || '',
+        name: entry.name || '', asset_type: entry.asset_type || '',
+        market: entry.market || '', chain: entry.chain || '', logo: entry.logo || '',
+        id: entry.id || assetId(entry)
+      };
+      if (!e.id) return items;
+      if (!String(e.query).trim() && !String(e.symbol).trim()) return items;
+    } else return items;
+    e.ts = nowArg != null ? nowArg : nowMs();
+    e.v = HISTORY_VERSION;
+    var drop = {};
+    drop[e.id] = 1;
+    var keys = [e.query, e.label, e.symbol], k;
+    for (k = 0; k < keys.length; k++) {
+      var kv = String(keys[k] || '').trim();
+      if (kv) drop['q:' + normQ(kv)] = 1;
+    }
+    var sym = String(e.symbol || '');
+    if (sym.indexOf(':') >= 0) drop['q:' + normQ(sym.split(':').slice(1).join(':'))] = 1;
+    var old = null;
+    for (k = 0; k < items.length; k++) if (drop[items[k].id]) { old = items[k]; break; }
+    if (old) {
+      for (var kk in e) if (Object.prototype.hasOwnProperty.call(e, kk)) {
+        var v = e[kk];
+        if (v !== '' && v != null && v !== 0) old[kk] = v;
+      }
+      e = old;
+    }
+    var rest = items.filter(function (x) { return !drop[x.id]; });
+    var out = [e].concat(rest.slice(0, Math.max(MAX_SEARCH_HISTORY - 1, 0)));
+    CFG.search_history = out;
+    saveCfg();
+    return out;
+  }
+  function deleteHistory(key) {
+    var items = normalizeHistory(CFG.search_history || []);
+    CFG.search_history = items.filter(function (h) {
+      return h.id !== key && String(h.query || '') !== key;
+    });
+    saveCfg();
+    return CFG.search_history;
+  }
+  function clearHistory() {
+    CFG.search_history = [];
+    saveCfg();
+    return CFG.search_history;
+  }
+  function historyQuery(h) {
+    if (typeof h === 'string') return h;
+    return String((h && (h.query || h.label)) || '');
+  }
+  function historySymbol(h) {
+    if (typeof h === 'string') return '';
+    return String((h && h.symbol) || '');
+  }
+  function historyLabel(h) {
+    if (typeof h === 'string') return h;
+    return String((h && (h.label || h.query || h.symbol)) || '');
   }
 
   function $(id) { return document.getElementById(id); }
@@ -386,7 +606,8 @@
     if (!c.onchain || typeof c.onchain !== 'object' || Array.isArray(c.onchain)) {
       c.onchain = {};
     }
-    if (!Array.isArray(c.search_history)) c.search_history = [];
+    // 搜索历史数据结构升级：旧版纯字符串数组 → 资产对象数组（自动兼容/去重/截断）
+    c.search_history = normalizeHistory(c.search_history);
     c.search_history = c.search_history.slice(0, MAX_SEARCH_HISTORY);
     if (!c.indicator_params || typeof c.indicator_params !== 'object' ||
         Array.isArray(c.indicator_params)) c.indicator_params = {};
@@ -1104,7 +1325,23 @@
   var KLINE_CACHE = readJSON('ct_kline', {});
   var _klineTimer = null;
   var openSheetId = '';
-  var _suppressClickUntil = 0;   // 长按已弹出操作表后，抑制抬手产生的 click
+  // 长按手势状态（模块级，便于在 touchcancel/失焦/页面隐藏/滚动时统一清理）。
+  var LP = { timer: null, sym: null, startX: 0, startY: 0, active: false, el: null };
+  // 长按/右键弹出菜单后，抑制「同一次手势」产生的普通 click；按具体行判定，
+  // 且只抑制一次（避免旧版全局时间窗吞掉后续不相干的轻触）。
+  var _suppressClickSym = null;
+  function lpCancel() {
+    if (LP.timer) { clearTimeout(LP.timer); LP.timer = null; }
+    LP.sym = null; LP.active = false; LP.el = null;
+  }
+  function lpArmClickSuppress(sym) { _suppressClickSym = sym; }
+  function lpConsumeClickSuppress(sym) {
+    if (_suppressClickSym !== null && _suppressClickSym === sym) {
+      _suppressClickSym = null; return true;   // 该手势的 click 已被消费
+    }
+    _suppressClickSym = null;                 // 其它手势：清标记，绝不吞正常点击
+    return false;
+  }
 
   function watchList(mk) {
     var out = [];
@@ -1614,7 +1851,32 @@
     if (page === 'search') return '搜索';
     return '设置';
   }
-  function go(page) {
+  // 返回按钮层级：仅顶栏保留「一个」返回按钮，按导航栈状态显示。
+  // 根页（首页 / 底部导航直接切换到的顶层 tab）无上一级 -> 隐藏；
+  // 子页（列表行→图表、搜索→图表等下钻）-> 显示，返回优先回到上一级。
+  // 页面组件里的 #btnSearchBack / #btnSettingsBack 属于重复返回按钮，统一隐藏，
+  // 避免「同一页两个返回箭头」。弹窗关闭由 openSheetId 单独处理，不与页面返回混淆。
+  var ROOT_PAGES = { list: 1, chart: 1, settings: 1 };
+  var NAV_STACK = [];       // 下钻时记录上一级页面
+  function navCanBack() { return NAV_STACK.length > 0 && !(PAGE === 'list' && NAV_STACK.length === 0); }
+  function syncBackButton() {
+    var btn = $('btnBack');
+    var show = NAV_STACK.length > 0;         // 有上一级才显示
+    if (btn) btn.hidden = !show;
+    // 统一隐藏页面内重复返回按钮（保留顶栏唯一一个）
+    ['btnSearchBack', 'btnSettingsBack'].forEach(function (id) {
+      var b = $(id); if (b) b.hidden = true;
+    });
+  }
+  function go(page, opts) {
+    opts = opts || {};
+    if (!opts.fromBack && page !== PAGE) {
+      if (opts.resetStack) NAV_STACK.length = 0;   // 底部导航 tab = 顶层切换
+      else {
+        NAV_STACK.push(PAGE);
+        if (NAV_STACK.length > 16) NAV_STACK.shift();
+      }
+    }
     closeSheets();
     PAGE = page;
     $('pageList').hidden = page !== 'list';
@@ -1623,6 +1885,7 @@
     $('pageSearch').hidden = page !== 'search';
     setNav(page);
     setTitle(pageTitle(page));
+    syncBackButton();
     if (page === 'list') {
       if (_klineTimer) { clearInterval(_klineTimer); _klineTimer = null; }
       resetHead(); renderList(); requestWindow();
@@ -3087,56 +3350,76 @@
     }
   }
 
-  // ===================== 搜索结果页（独立页面 + 最近 100 条历史） =====================
+  // ===================== 统一搜索结果页（本地索引优先 + 对象化历史） =====================
   var SEARCH_QUERY = '';
-  function recordSearchHistory(q) {
-    q = String(q || '').trim();
-    if (!q) return;
-    var h = CFG.search_history || [];
-    h = h.filter(function (x) { return String(x) !== q; });
-    h.unshift(q);
-    CFG.search_history = h.slice(0, MAX_SEARCH_HISTORY);
-    saveCfg();
+  // 统一资产类型标签：股票 / 交易所加密货币 / 链上代币，清楚标识市场与区块链
+  var ASSET_TYPE_TAG = { stock: '股票', cex: '交易所', onchain: '链上代币' };
+  function assetKindLabel(h) {
+    var t = ASSET_TYPE_TAG[h.asset_type] || '资产';
+    var where = h.chain || (MARKET_NAME[h.market] || h.market || '');
+    return t + (where ? ' · ' + where : '');
   }
-  function clearSearchHistory() {
-    CFG.search_history = [];
-    saveCfg();
-    renderSearchPage('');
-    toast('搜索历史已清空');
+
+  // 把一个内部 symbol 归一为统一 hit；onchain 用 chain+address 作身份
+  function hitFromSymbol(sym) {
+    sym = String(sym || '');
+    var code = isOnchain(sym) ? ocCode(sym) : sym.replace(/^.*:/, '');
+    var nm = nameOf(sym) || '';
+    if (isOnchain(sym)) {
+      var meta = (CFG.onchain || {})[sym] || {};
+      return makeHit({ symbol: sym, label: code, name: nm,
+        asset_type: 'onchain', market: 'onchain',
+        chain: meta.chain || chainOfAddr(ocAddr(sym)) || '链上',
+        address: ocAddr(sym), query: '' });
+    }
+    var mk = marketOf(sym);
+    return makeHit({ symbol: sym, label: code, name: nm,
+      asset_type: mk === 'crypto' ? 'cex' : 'stock', market: mk, query: '' });
   }
-  function searchMatches(q) {
-    var s = String(q || '').trim().toLowerCase(), out = [], seen = {}, i, mk, j;
-    if (!s) return out;
-    var pools = [];
+
+  // 本地索引：股票 + CEX + 自选 + 内置链上代币索引，统一建模后按相关性排序
+  function buildUnifiedHits(q) {
+    var i, j, hits = [];
     for (i = 0; i < MARKETS.length; i++) {
-      mk = MARKETS[i][0];
-      pools = pools.concat((ALL[mk] || []).slice());
+      var mk = MARKETS[i][0], list = (ALL[mk] || []).slice();
+      for (j = 0; j < list.length; j++) hits.push(hitFromSymbol(list[j]));
     }
-    pools = pools.concat(CFG.symbols.slice());
-    for (j = 0; j < pools.length; j++) {
-      var sym = String(pools[j]);
-      if (seen[sym]) continue;
-      var code = isOnchain(sym) ? ocCode(sym) : sym.replace(/^.*:/, '');
-      var nm = nameOf(sym) || '';
-      if (sym.toLowerCase().indexOf(s) >= 0 ||
-          code.toLowerCase().indexOf(s) >= 0 ||
-          String(nm).toLowerCase().indexOf(s) >= 0) {
-        seen[sym] = 1; out.push(sym);
-        if (out.length >= 60) break;
-      }
+    var watch = CFG.symbols.slice();
+    for (j = 0; j < watch.length; j++) hits.push(hitFromSymbol(watch[j]));
+    // 内置链上代币索引：名称 / Symbol / 别名可搜，身份 = chain + address
+    for (j = 0; j < OC_TOKENS.length; j++) {
+      var t = OC_TOKENS[j];
+      hits.push(makeHit({ symbol: ocSymbol(t.address), label: t.sym, name: t.name,
+        asset_type: 'onchain', market: 'onchain', chain: t.chain,
+        address: t.address, aliases: t.aliases || [], query: '' }));
     }
+    return mergeHits([hits], q, 60);
+  }
+
+  // 兼容旧测试：searchMatches 返回内部 symbol 数组（顺序 = 相关性顺序）
+  function searchMatches(q) {
+    var s = String(q || '').trim();
+    if (!s) return [];
+    var hits = buildUnifiedHits(s), out = [], i;
+    for (i = 0; i < hits.length; i++) out.push(hits[i].symbol);
     return out;
   }
-  function searchResultHTML(sym) {
-    var code = isOnchain(sym) ? ocCode(sym) : String(sym).replace(/^.*:/, '');
+  // 渲染统一结果行：清楚标识资产类型 / 市场 / 区块链；无数据字段不编造
+  function searchResultHTML(symOrHit) {
+    var h = (symOrHit && typeof symOrHit === 'object') ? symOrHit : hitFromSymbol(symOrHit);
+    var sym = h.symbol, code = h.label || sym.replace(/^.*:/, '');
     var watched = CFG.symbols.indexOf(sym) >= 0;
+    var sub = assetKindLabel(h);
+    if (h.asset_type === 'onchain' && h.address) sub += ' · ' + shortAddr(h.address);
+    var addAttr = h.asset_type === 'onchain' && h.address
+      ? 'data-addcontract="' + esc(h.address) + '"'
+      : 'data-search-add="' + esc(sym) + '"';
     return '<div class="sresult" data-search-open="' + esc(sym) + '">' +
       '<div class="ico">' + symbolIconHTML(sym, code) + '</div>' +
       '<div class="info"><div><span class="code">' + esc(code) + '</span>' +
-      '<span class="name">' + esc(nameOf(sym)) + '</span></div>' +
-      '<div class="sub">' + esc(MARKET_NAME[marketOf(sym)] || '链上合约') +
-      ' · 点击进图表</div></div>' +
-      '<button class="add" data-search-add="' + esc(sym) + '" aria-label="加入自选">' +
+      '<span class="name">' + esc(h.name || nameOf(sym)) + '</span></div>' +
+      '<div class="sub">' + esc(sub) + ' · 点击进图表</div></div>' +
+      '<button class="add" ' + addAttr + ' aria-label="加入自选">' +
       (watched ? '✓' : '＋') + '</button></div>';
   }
   function renderSearchPage(q) {
@@ -3145,18 +3428,22 @@
     if (box) box.value = SEARCH_QUERY;
     var body = $('searchBody'), html = '', count = 0;
     if (!SEARCH_QUERY) {
-      var hist = CFG.search_history || [];
+      // 聚焦且内容为空 -> 显示历史记录（对象化，单条删除 / 点击直接打开资产）
+      var hist = normalizeHistory(CFG.search_history || []);
       count = hist.length;
       for (var i = 0; i < hist.length; i++) {
-        html += '<div class="hist-row" data-history="' + esc(hist[i]) + '">' +
-          '<span>🕘 ' + esc(hist[i]) + '</span>' +
-          '<button class="del" data-history-del="' + esc(hist[i]) + '">✕</button></div>';
+        var e = hist[i], label = historyLabel(e);
+        html += '<div class="hist-row" data-history="' + esc(e.id) + '">' +
+          '<span>🕘 ' + esc(label) +
+          (e.asset_type ? ' <small>' + esc(assetKindLabel(e)) + '</small>' : '') +
+          '</span>' +
+          '<button class="del" data-history-del="' + esc(e.id) + '">✕</button></div>';
       }
       if (!count) html = '<div class="empty">还没有搜索记录<br>输入代码、名称或链上合约地址后点 🔍</div>';
-      $('searchTitle').textContent = '最近搜索（最多 100 条）';
+      $('searchTitle').textContent = '最近搜索（最多 ' + MAX_SEARCH_HISTORY + ' 条）';
     } else {
       html += contractHitHTML(SEARCH_QUERY);
-      var hits = searchMatches(SEARCH_QUERY);
+      var hits = buildUnifiedHits(SEARCH_QUERY);
       count = hits.length;
       for (var j = 0; j < hits.length; j++) html += searchResultHTML(hits[j]);
       if (isContract(SEARCH_QUERY)) count += 1;
@@ -3166,14 +3453,46 @@
     body.innerHTML = html;
     $('searchCount').textContent = String(count);
   }
+  // 只在「确认搜索」时记录：有结果才记，避免防抖脏数据 / 失败或无效输入被永久保存
   function submitSearch(q) {
     q = String(q || '').trim();
-    if (q) recordSearchHistory(q);
+    if (q) {
+      var hits = buildUnifiedHits(q);
+      if (hits.length || isContract(q)) {
+        var top = hits.length ? hits[0] : null;
+        var entry = top ? {
+          query: q, label: top.label || q, symbol: '', name: top.name || '',
+          asset_type: top.asset_type || '', market: top.market || '',
+          chain: top.chain || '', logo: '', id: ''
+        } : { query: q, label: q };
+        // 查询历史用 q: 键（不占用具体资产身份，点击时回填重搜）
+        if (top) entry.id = 'q:' + normQ(q);
+        recordHistory(entry);
+      }
+    }
     renderSearchPage(q);
   }
-  function openSearchResult(sym) {
+  function clearSearchHistory() {
+    clearHistory();
+    renderSearchPage('');
+    toast('搜索历史已清空');
+  }
+  // 兼容旧入口 / 测试：按查询字符串记录一条历史（内部走对象化模型）
+  function recordSearchHistory(q) {
+    q = String(q || '').trim();
+    if (!q) return;
+    recordHistory(q);
+  }
+  // 点击结果：记录「具体资产」到历史（含 symbol，可直接打开），再进图表
+  function openSearchResult(symOrHit) {
+    if (!symOrHit) return;
+    var h = (symOrHit && typeof symOrHit === 'object') ? symOrHit : hitFromSymbol(symOrHit);
+    var sym = h.symbol;
     if (!sym) return;
-    recordSearchHistory(SEARCH_QUERY);
+    recordHistory({ query: SEARCH_QUERY || h.label || h.name,
+      label: h.label || h.name, symbol: sym, name: h.name || '',
+      asset_type: h.asset_type || '', market: h.market || '',
+      chain: h.chain || '', logo: h.logo || '' });
     CHART_SYMBOL = sym; CFG.last_symbol = sym; saveCfg();
     go('chart');
   }
@@ -3390,19 +3709,21 @@
 
   // ===================== 事件绑定 =====================
   function onListClick(e) {
-    if (nowMs() < _suppressClickUntil) { _suppressClickUntil = 0; return; }
     var el = e.target;
     while (el && el !== document.body) {
       if (el.getAttribute) {
         if (el.getAttribute('data-goall')) {
+          lpConsumeClickSuppress(null);
           CFG.sub_tabs[MARKET] = 'all'; saveCfg();
           LOADED = PAGE_SIZE; renderList(); requestWindow();
           return;
         }
         var addr = el.getAttribute('data-addcontract');
-        if (addr) { addContract(addr); return; }
+        if (addr) { lpConsumeClickSuppress(null); addContract(addr); return; }
         var sym = el.getAttribute('data-sym');
         if (sym && el.className && String(el.className).indexOf('trow') >= 0) {
+          // 长按/右键刚弹过菜单的同一次手势：吞掉这次 click；其它轻触正常打开详情
+          if (lpConsumeClickSuppress(sym)) return;
           CHART_SYMBOL = sym; CFG.last_symbol = sym; saveCfg();
           go('chart');            // go 内部会 openChart 一次，避免重复请求 K 线
           return;
@@ -3412,37 +3733,57 @@
     }
   }
   function bind() {
-    // 长按 500ms 出行操作（替代桌面右键），滑动不误触
-    var lpTimer = null, lpSym = null, lpY = 0, lpMoved = false;
     var list = $('list');
-    list.addEventListener('touchstart', function (e) {
-      var el = e.target;
-      while (el && el !== list && !el.getAttribute('data-sym')) el = el.parentNode;
-      if (!el || el === list) return;
-      lpSym = el.getAttribute('data-sym');
-      lpY = e.touches[0].clientY; lpMoved = false;
-      clearTimeout(lpTimer);
-      lpTimer = setTimeout(function () {
-        if (!lpMoved && lpSym) {
-          _suppressClickUntil = nowMs() + 800;
-          showRowSheet(lpSym);
-          lpSym = null;
-        }
-      }, 500);
-    }, { passive: true });
-    list.addEventListener('touchmove', function (e) {
-      if (Math.abs(e.touches[0].clientY - lpY) > 10) { lpMoved = true; clearTimeout(lpTimer); }
-    }, { passive: true });
-    list.addEventListener('touchend', function () { clearTimeout(lpTimer); lpSym = null; }, { passive: true });
-    // 桌面式右键（WebView 长按键 / 鼠标）同样打开行菜单，替代已删除的 ⋯
-    list.addEventListener('contextmenu', function (e) {
+    // 长按触发延迟 / 移动容差为可配置常量（LONG_PRESS_MS 500~650、LONG_PRESS_SLOP 8~12dp），
+    // 不写死在事件里；双轴判定，滚动/移动/取消/失焦都会取消识别。
+    function rowElOf(e) {
       var el = e.target;
       while (el && el !== list && !(el.getAttribute && el.getAttribute('data-sym'))) {
         el = el.parentNode;
       }
-      if (el && el !== list) {
+      return (el && el !== list) ? el : null;
+    }
+    list.addEventListener('touchstart', function (e) {
+      var el = rowElOf(e);
+      var t = e.touches && e.touches[0];
+      if (!el || !t) return;
+      _suppressClickSym = null;              // 新手势开始，清掉上一次的抑制标记
+      lpCancel();
+      LP.sym = el.getAttribute('data-sym');
+      LP.startX = t.clientX; LP.startY = t.clientY;
+      LP.active = true; LP.el = el;
+      LP.timer = setTimeout(function () {
+        if (LP.active && LP.sym) {
+          lpArmClickSuppress(LP.sym);        // 长按已触发：抑制同手势 click
+          showRowSheet(LP.sym);
+          lpCancel();
+        }
+      }, LONG_PRESS_MS);
+    }, { passive: true });
+    list.addEventListener('touchmove', function (e) {
+      if (!LP.active) return;
+      var t = e.touches && e.touches[0];
+      if (!t) return;
+      // 双轴移动容差：任一轴超过阈值即视为滚动 / 平移，取消长按
+      if (Math.abs(t.clientX - LP.startX) > LONG_PRESS_SLOP ||
+          Math.abs(t.clientY - LP.startY) > LONG_PRESS_SLOP) {
+        lpCancel();
+      }
+    }, { passive: true });
+    function onTouchEnd() { lpCancel(); }     // 抬手即结束识别（未到延迟不弹菜单）
+    list.addEventListener('touchend', onTouchEnd, { passive: true });
+    list.addEventListener('touchcancel', onTouchEnd, { passive: true });
+    // 页面失焦：清理手势状态，避免幽灵定时器（切后台由统一 visibilitychange 处理）
+    window.addEventListener('blur', lpCancel);
+    // 桌面式右键（WebView 长按键 / 鼠标右键）：保留原有菜单功能，补 click 抑制
+    list.addEventListener('contextmenu', function (e) {
+      var el = rowElOf(e);
+      if (el) {
         if (e.preventDefault) e.preventDefault();
-        showRowSheet(el.getAttribute('data-sym'));
+        lpCancel();
+        var sym = el.getAttribute('data-sym');
+        lpArmClickSuppress(sym);
+        showRowSheet(sym);
       }
     });
     // 图标加载失败退回字徽（error 不冒泡，用捕获阶段接住）
@@ -3455,6 +3796,8 @@
     }, true);
     list.addEventListener('click', onListClick);
     list.addEventListener('scroll', function () {
+      // 列表开始正常滚动 -> 取消长按识别，绝不弹菜单（惯性滚动同样触发）
+      if (LP.active) lpCancel();
       var el = $('list');
       headOnScroll(el.scrollTop);          // v38：顶部工具区随滚动收起 / 展开
       if (el.scrollTop + el.clientHeight > el.scrollHeight - 240) loadMore();
@@ -3635,7 +3978,8 @@
     $('btnOpenIndicators').addEventListener('click', showIndicatorSheet);
     $('btnExport').addEventListener('click', exportConfig);
     $('btnImport').addEventListener('click', importConfig);
-    $('btnSettingsBack').addEventListener('click', function () { go('list'); });
+    // 页面内重复返回按钮已隐藏；保留监听器但统一走系统返回逻辑，避免行为分叉
+    $('btnSettingsBack').addEventListener('click', function () { window.__androidBack(); });
 
     // 顶部 / 底部导航 / 状态
     $('btnRefresh').addEventListener('click', function () {
@@ -3649,7 +3993,8 @@
     $('bottomNav').addEventListener('click', function (e) {
       var el = e.target;
       while (el && !el.getAttribute('data-tab')) el = el.parentNode;
-      if (el) go(el.getAttribute('data-tab'));
+      // 底部导航 = 顶层 tab 切换：清空下钻栈，回到根层级（不显示返回箭头）
+      if (el) go(el.getAttribute('data-tab'), { resetStack: true });
     });
 
     // ---- 搜索独立页 / 历史 ----
@@ -3677,16 +4022,15 @@
       renderSearchPage(e.target.value || '');
     });
     $('btnClearHistory').addEventListener('click', clearSearchHistory);
-    $('btnSearchBack').addEventListener('click', function () { go('list'); });
+    $('btnSearchBack').addEventListener('click', function () { window.__androidBack(); });
     $('searchBody').addEventListener('click', function (e) {
       var el = e.target, attr = function (k) {
         return el.getAttribute && el.getAttribute(k);
       };
       var del = attr('data-history-del');
       if (del) {
-        CFG.search_history = (CFG.search_history || []).filter(
-          function (x) { return String(x) !== del; });
-        saveCfg(); renderSearchPage(SEARCH_QUERY); return;
+        deleteHistory(del);          // 按资产唯一 id 删除单条（兼容旧字符串键）
+        renderSearchPage(SEARCH_QUERY); return;
       }
       var add = attr('data-search-add');
       if (add) {
@@ -3700,7 +4044,18 @@
         return;
       }
       var hist = attr('data-history');
-      if (hist) { $('searchBox').value = hist; submitSearch(hist); return; }
+      if (hist) {
+        // 点击历史：有明确资产 symbol 就直接打开图表；否则回填查询词重搜
+        var entries = normalizeHistory(CFG.search_history || []);
+        var picked = null;
+        for (var hi = 0; hi < entries.length; hi++) {
+          if (entries[hi].id === hist) { picked = entries[hi]; break; }
+        }
+        var sym = historySymbol(picked);
+        if (sym) { openSearchResult(hitFromSymbol(sym)); return; }
+        var q = historyQuery(picked || hist);
+        $('searchBox').value = q; submitSearch(q); return;
+      }
       var open = attr('data-search-open');
       if (open) { openSearchResult(open); return; }
       // 点在结果行空白处：冒泡到父节点再取一次
@@ -3755,10 +4110,16 @@
     drawChart();
   }
 
-  // 系统返回键：先关弹出层 → 再回行情 → 最后退出
+  // 系统返回键 / 返回手势：
+  //   1. 有弹出层 -> 只关闭弹窗（弹窗关闭 != 页面返回，二者严格区分）
+  //   2. 有下钻父页 -> 返回上一级（优先于直接回首页）
+  //   3. 非根页且无父页 -> 回首页
+  //   4. 根页(首页) -> 交还 Native 退出应用（不在根页显示无意义返回按钮）
   window.__androidBack = function () {
     if (openSheetId) { closeSheets(); return; }
-    if (PAGE !== 'list') { go('list'); return; }
+    var prev = NAV_STACK.length ? NAV_STACK.pop() : null;
+    if (prev && prev !== PAGE) { go(prev, { fromBack: true }); return; }
+    if (PAGE !== 'list') { go('list', { fromBack: true, resetStack: true }); return; }
     if (window.Native && Native.finish) Native.finish();
   };
 
@@ -3794,6 +4155,7 @@
     renderList();
     setNav('list');
     setTitle('行情');
+    syncBackButton();   // 首页为根层级：隐藏返回箭头、隐藏页内重复返回按钮
     setStatus(TICKER_ASOF
       ? '● 上次真实快照 · ' + fmtTime(TICKER_ASOF) + ' · 正在刷新…'
       : '● 连接中 · 来源 ' + SOURCE_TEXT, false);
@@ -3802,8 +4164,10 @@
     measureHead();   // v38：DOM 填充完毕后量一次真实高度，供折叠动画用
   }
   // 从后台切回：立即按当前周期边界校验一次，避免跨日后仍显示旧快照。
+  // 切到后台时同时取消未完成的长按识别，避免幽灵定时器弹菜单。
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible' && PAGE === 'chart') {
+    if (document.visibilityState !== 'visible') { lpCancel(); return; }
+    if (PAGE === 'chart') {
       loadChart(true);
       restartLiveTimer();
       restartKlineTimer();
@@ -3862,6 +4226,15 @@
     recordSearchHistory: recordSearchHistory, clearSearchHistory: clearSearchHistory,
     searchMatches: searchMatches, searchResultHTML: searchResultHTML,
     openSearchResult: openSearchResult, symbolIconHTML: symbolIconHTML,
+    // 统一资产模型 / 搜索历史（对象化）
+    chainId: chainId, assetId: assetId, makeHit: makeHit,
+    relevance: relevance, mergeHits: mergeHits, buildUnifiedHits: buildUnifiedHits,
+    hitFromSymbol: hitFromSymbol, assetKindLabel: assetKindLabel,
+    normalizeHistory: normalizeHistory, recordHistory: recordHistory,
+    deleteHistory: deleteHistory, clearHistory: clearHistory,
+    historyQuery: historyQuery, historySymbol: historySymbol,
+    historyLabel: historyLabel, OC_TOKENS: OC_TOKENS,
+    MAX_SEARCH_HISTORY: MAX_SEARCH_HISTORY,
     clampPan: clampPan, syncSettings: syncSettings, applyTheme: applyTheme,
     // v35：批量行情失败拆分降级（含非法交易对不再让整批空白）
     binanceBatch: binanceBatch, fetchTickers: fetchTickers,
@@ -3902,6 +4275,25 @@
       return { hidden: headHidden, height: headH,
                acc: headAcc, last: headLastTop };
     },
-    back: function () { return window.__androidBack(); }
+    back: function () { return window.__androidBack(); },
+    // 返回按钮层级 / 导航栈（只读观测点 + 可直接 go 带 opts）
+    syncBackButton: syncBackButton, closeSheets: closeSheets,
+    navStack: function () { return NAV_STACK.slice(); },
+    navCanBack: navCanBack,
+    goWith: function (p, o) { return go(p, o || {}); },
+    backBtnHidden: function () { return $('btnBack').hidden; },
+    // 长按手势：可配置参数 + 只读状态 + 事件注入口
+    lpConfig: function (ms, slop) {
+      if (ms !== undefined) LONG_PRESS_MS = clamp(Number(ms) || LONG_PRESS_MS, 300, 1500);
+      if (slop !== undefined) LONG_PRESS_SLOP = clamp(Number(slop) || LONG_PRESS_SLOP, 4, 30);
+      return { ms: LONG_PRESS_MS, slop: LONG_PRESS_SLOP };
+    },
+    lpState: function () {
+      return { active: LP.active, sym: LP.sym, hasTimer: !!LP.timer,
+               suppressSym: _suppressClickSym };
+    },
+    lpCancel: lpCancel,
+    lpArmSuppress: lpArmClickSuppress,
+    lpConsumeSuppress: lpConsumeClickSuppress
   };
 })();
