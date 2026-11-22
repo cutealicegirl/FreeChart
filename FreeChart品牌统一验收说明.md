@@ -68,4 +68,6 @@
 
 - 真机 Android 10+ 的 adb 安装 / 启动（本环境无设备或模拟器）。
 - 外网 DEX 数据源端到端拉取（本环境不可直连，已 mock 覆盖）。
-- Windows Setup 安装包：Inno Setup `iscc.exe` 未安装，本轮未重建。
+- Windows Setup 安装包：已用本机 Inno Setup（位于 `%LOCALAPPDATA%\Programs\Inno Setup 6`）重新编译
+  `installer/FreeChart-Setup-1.5.0.exe`（65,471,767 字节），基于新品牌 `dist/Free Chart.exe`，
+  零旧名残留，并已覆盖上传到 GitHub Release。
