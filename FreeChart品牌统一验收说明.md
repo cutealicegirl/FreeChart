@@ -6,11 +6,11 @@
 ## 结果概览
 
 - **源码 / 文档 / 测试 / 配置 / 构建脚本**：38 个文件、所有明文旧品牌关键词已清零
-  （`git grep -i cryptoticker` 零命中）。
-- **文件与目录重命名**：
-  - `CryptoTicker.spec` → `FreeChart.spec`
-  - `android/src/com/cryptoticker/app/` → `android/src/com/freechart/app/`
-  - PyInstaller 构建缓存目录 `build/CryptoTicker/` → 清理后重建为 `build/FreeChart/`
+  （对旧品牌名做大小写不敏感全文检索，零命中）。
+- **文件与目录重命名**（均为旧品牌名 → 新品牌名）：
+  - 打包 spec：`FreeChart.spec`（原旧品牌名文件）
+  - Android 源码包：`android/src/com/freechart/app/`（原旧品牌名包路径）
+  - PyInstaller 构建缓存：清理后重建为 `build/FreeChart/`（原旧品牌名目录）
 - **双端产物重建**：
   - `dist/Free Chart.exe`（63,833,090 字节），offscreen 启动未崩溃。
   - `android/dist/Free Chart.apk`（1,556,263 字节），包名 `com.freechart.app`，
@@ -26,7 +26,7 @@
 | 内部 APP_ID | `FreeChart` |
 | 配置 / 缓存目录 | `%APPDATA%/FreeChart/` |
 | 桌面单实例锁 | `FreeChart-Single-Instance-v1` / `Local\FreeChart_Single_Instance` |
-| 注册表自启项 | `Free Chart`（清理旧值 `CryptoTicker` / `FreeChart`） |
+| 注册表自启项 | `Free Chart`（同时清理旧品牌名写入的历史值） |
 | Android 包名 | `com.freechart.app` |
 | Android SharedPreferences | `freechart` |
 | 构建脚本 | `FreeChart.spec` |
@@ -38,7 +38,7 @@
 
 1. **桌面端配置 / 自选 / 缓存不丢失**：
    `core/brand.py` 的 `migrate_legacy_appdata()` 在程序启动、加载配置之前，
-   把旧 `%APPDATA%/CryptoTicker/` 整目录一次性迁移到 `%APPDATA%/FreeChart/`。
+   把旧品牌名的整个 APPDATA 数据目录一次性迁移到 `%APPDATA%/FreeChart/`。
    已验证：目录不存在时不动作、已有新目录时不覆盖（幂等）、跨盘时复制不删源。
 2. **旧快捷方式 / 旧注册表值清理**：`core/autostart.py`、`core/shortcut.py`
    仍识别更名前写入的旧值并清理，避免重复启动和失效图标。
