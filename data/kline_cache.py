@@ -10,7 +10,7 @@
   后记 checked_bucket，在 TTL 内不再重复打源，既不滞后也不放大请求；
 - GUI 线程与 KlineWorker / HistoryWorker 各用各自的 sqlite 连接
   （threading.local），避免跨线程复用连接报错；
-- 路径在 %APPDATA%/CryptoTicker/klines.sqlite3，测试用临时 APPDATA 隔离。
+- 路径在 %APPDATA%/FreeChart/klines.sqlite3，测试用临时 APPDATA 隔离。
 """
 import os
 import sqlite3
@@ -64,7 +64,7 @@ def _adjust_tag(symbol: str) -> str:
 
 def db_path() -> str:
     base = os.getenv("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "CryptoTicker", _DB_NAME)
+    return os.path.join(base, "FreeChart", _DB_NAME)
 
 
 def _conn() -> sqlite3.Connection:

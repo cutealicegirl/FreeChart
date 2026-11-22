@@ -1,4 +1,4 @@
-/* CryptoTicker Android 移动端主逻辑。
+/* FreeChart Android 移动端主逻辑。
  *
  * 数据全部来自与桌面端相同的公开接口，绝不使用模拟数据：
  *   Binance   https://data-api.binance.vision/api/v3/ticker/24hr | /klines

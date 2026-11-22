@@ -36,9 +36,9 @@ def pump(times=25, delay=0.01):
 
 # ================= 1. 单实例互斥 =================
 # 用独立管道名，避免和机器上正在运行的真实实例抢同一个名字
-entry._SERVER_NAME = "CryptoTicker-Test-%d" % os.getpid()
+entry._SERVER_NAME = "FreeChart-Test-%d" % os.getpid()
 # 互斥量也要独立：本机可能正跑着正式版，否则会被判成「已有实例」
-entry._MUTEX_NAME = "Local\\CryptoTicker_Test_%d" % os.getpid()
+entry._MUTEX_NAME = "Local\\FreeChart_Test_%d" % os.getpid()
 QLocalServer.removeServer(entry._SERVER_NAME)
 assert entry._acquire_mutex() is True, "首个进程应拿到单实例互斥量"
 assert entry._claim_single_instance(app) is True, "首个进程应是主实例"

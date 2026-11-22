@@ -9,7 +9,7 @@
 覆盖加密货币 / A股 / 港股 / 美股 / 链上合约，并提供品种发展历程与详情档案。
 
 - 技术栈：Python 3.11+ / PySide6 / requests，图表与控件全部 QPainter 自绘
-- 对外显示名与交付文件名统一为 `Free Chart`；内部 ID `CryptoTicker` 仅用于配置、缓存与单实例锁
+- 对外显示名与交付文件名统一为 `Free Chart`；内部 ID `FreeChart` 仅用于配置、缓存与单实例锁
 - 特点：深色金融终端风格、常驻桌面、低资源占用、多数据源自动切换
 
 ## 下载
@@ -140,11 +140,11 @@ python main.py
 桌面端用 PyInstaller 打包为单文件 exe：
 
 ```bash
-python -m PyInstaller CryptoTicker.spec --noconfirm --clean
+python -m PyInstaller FreeChart.spec --noconfirm --clean
 ```
 
 产物：`dist/Free Chart.exe`（单文件，含图标、字体、品种清单、看板娘素材与
-公司行为登记库）。`CryptoTicker.spec` 是内部构建文件名。
+公司行为登记库）。`FreeChart.spec` 是内部构建文件名。
 
 ### 制作安装包（可安装程序）
 
@@ -176,7 +176,7 @@ Android 端构建与签名见 `android/` 目录说明；交付 APK 位于
 ## 目录结构
 
 ```text
-CryptoTicker/
+FreeChart/
 ├── main.py                    # 入口（单实例互斥量 + 异常兜底：只写日志，不弹窗）
 ├── ui/                        # 界面层
 │   ├── main_window.py         # 主窗口（按页懒加载 / 排序 / 置顶 / 导航 / 无边框拉伸）

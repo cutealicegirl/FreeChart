@@ -147,7 +147,7 @@ finally:
     ba.HTTP.get = orig_get
 
 # ---------- 7. 老配置元数据补齐 ----------
-cfgdir = os.path.join(_TMP, "CryptoTicker")
+cfgdir = os.path.join(_TMP, "FreeChart")
 os.makedirs(cfgdir, exist_ok=True)
 cfgpath = os.path.join(cfgdir, "config.json")
 with open(cfgpath, "w", encoding="utf-8") as f:

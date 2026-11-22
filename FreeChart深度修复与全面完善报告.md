@@ -1,6 +1,6 @@
 # FreeChart 深度修复与全面完善报告
 
-- 项目：`CryptoTicker`（对外品牌 Free Chart），仓库 `https://github.com/cutealicegirl/FreeChart`
+- 项目：`FreeChart`（对外品牌 Free Chart），仓库 `https://github.com/cutealicegirl/FreeChart`
 - 工作分支：`fix/deep-review-20261115`（独立分支，**全程未提交、未推送、未创建 PR、未改仓库设置**，等待审查授权）
 - 基线提交：`0fa352c chore(android): 版本同步至 1.3.0 / versionCode 7`
 - 报告日期：2026-11-16
@@ -92,7 +92,7 @@
 
 - **原因**：项目此前是"半复权"状态——A股/港股日线靠腾讯 `qfq` 单参数兜底（且只调价不调量），美股新浪接口与所有分钟线返回未复权原始价，缓存无复权维度、无公司行为主数据。
 - **真实数据证据**（新浪美股日线实测）：AAPL 2020-08-31 499.23→129.04（≈1/4，288% 假跳空）；TSLA 2022 1拆3（201%）；NVDA 2024 1拆10（893%）；AMZN 2022 1拆20（1861%）。复权后假跳空分别降至 3.3%/0.3%/0.7%/2.0%。
-- **修改文件**：新增 `data/corporate_actions.py`（事件模型）、`data/corporate_actions.json`（已核实登记库）、`data/price_adjustment.py`（复权数学核心）、`data/corporate_actions_fetch.py`（东财分红送配抓取）；修改 `data/klines.py`、`data/kline_cache.py`、`data/history_stats.py`、`android/assets/www/app.js`、`CryptoTicker.spec`
+- **修改文件**：新增 `data/corporate_actions.py`（事件模型）、`data/corporate_actions.json`（已核实登记库）、`data/price_adjustment.py`（复权数学核心）、`data/corporate_actions_fetch.py`（东财分红送配抓取）；修改 `data/klines.py`、`data/kline_cache.py`、`data/history_stats.py`、`android/assets/www/app.js`、`FreeChart.spec`
 - **方案要点**：
   - 区分原始/前复权价，事件带 ex-date、ratio、来源、confidence；
   - **经验门控**：仅当观测跳空≈拆股比例才认定未复权，已复权数据自动跳过 → 从根上防二次复权；
@@ -204,7 +204,7 @@
 | Python 全量语法检查 | `python -m py_compile`（所有 .py）| **PASS，0 失败** |
 | JS 全量语法检查 | `node --check`（所有 .js）| **PASS，0 失败** |
 | Android APK 构建 | `python android/build_apk.py` | **PASS**，生成 `android/dist/Free Chart.apk`（1,539,879 字节），通过 Android 10-14 v3 签名校验与旧版 v1 回退校验 |
-| Windows PyInstaller 打包 | — | **BLOCKED**：环境未安装 PyInstaller（`import PyInstaller` 失败）。已确认 `CryptoTicker.spec` 的 `datas` 含新增 `corporate_actions.json`、`hiddenimports` 含新增模块，打包配置已就绪，但未实际产出 EXE |
+| Windows PyInstaller 打包 | — | **BLOCKED**：环境未安装 PyInstaller（`import PyInstaller` 失败）。已确认 `FreeChart.spec` 的 `datas` 含新增 `corporate_actions.json`、`hiddenimports` 含新增模块，打包配置已就绪，但未实际产出 EXE |
 | 真机兼容性自测 | — | **NOT RUN**：无 Android 真机（对应任务 #93 历史遗留） |
 
 ---
@@ -238,7 +238,7 @@
 | `data/history_stats.py` | 统计标注复权口径 |
 | `android/assets/www/app.js` | K 线竞态守卫、增量渲染、时间戳单调性、复权、跨端键名、周期对齐 |
 | `android/tests/test_app_logic.js` | 追加跨端导入回归断言 |
-| `CryptoTicker.spec` | datas 增补 corporate_actions.json、hiddenimports 增补新模块 |
+| `FreeChart.spec` | datas 增补 corporate_actions.json、hiddenimports 增补新模块 |
 
 ### 新增文件
 | 文件 | 用途 |
@@ -267,7 +267,7 @@
 ## 8. 最终建议（下一阶段最值得做的 3-5 项）
 
 1. **[最高价值] 桌面"全部"页视口虚拟化**：用有限行对象池 + 可见区域挂载替换当前"按页累积挂载"，彻底解决浏览越久对象越多的累积问题。风险较高，建议单独分支、以本次 `test_perf_1000.py` 为性能基线，目标把末页挂载行数从 1000 压到 ~视口行数 + 缓冲。
-2. **[完成交付闭环] 安装 PyInstaller 并实跑打包**：验证 `CryptoTicker.spec` 冻结后 `corporate_actions.json` 资源路径与新增模块导入，产出可安装 EXE；同时用真机跑 APK 兼容性自测（任务 #93），补齐最后两个 BLOCKED/NOT RUN 项。
+2. **[完成交付闭环] 安装 PyInstaller 并实跑打包**：验证 `FreeChart.spec` 冻结后 `corporate_actions.json` 资源路径与新增模块导入，产出可安装 EXE；同时用真机跑 APK 兼容性自测（任务 #93），补齐最后两个 BLOCKED/NOT RUN 项。
 3. **[数据准确性] 接入权威复权数据源**：当前因子来自已核实登记库 + 东财送转事件；建议接入带 prev_close 的权威分红数据源，把"只标记不修复"的纯现金分红纳入精确复权，并补腾讯 qfq 成交量补量的真实数据端到端验证。
 4. **[一致性] 统一 `sort_reverse` 语义与年K逐根对齐**：与用户确认排序方向交互是否需要统一；补双端年K逐根对齐测试，消除聚合边界的潜在细微差异。
 5. **[可靠性] 端到端网络恢复回归**：用可控 mock 模拟"断网→恢复"，验证桌面与 Android 都能自动补充刷新且旧数据不覆盖新数据，把第 6 节问题 7 从"部分覆盖"提升为完整验证。

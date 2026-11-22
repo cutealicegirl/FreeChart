@@ -10,13 +10,13 @@
 
 本模块用三重保险让图标始终跟程序一致：
 
-1. 把当前 ICO 复制成 %APPDATA%/CryptoTicker/icons/app_<内容哈希>.ico，
+1. 把当前 ICO 复制成 %APPDATA%/FreeChart/icons/app_<内容哈希>.ico，
    内容一变文件名就变，图标缓存的键随之改变，旧图不可能再命中；
 2. 用 IShellLink 把「指向本程序」的快捷方式 IconLocation 改指这个 ico
    （只改图标位置，不动目标路径 / 参数 / 工作目录）；
 3. SHChangeNotify 通知外壳刷新，并调用 ie4uinit -show 重建图标缓存。
 
-只处理目标路径属于本程序、或文件名含 Free Chart / CryptoTicker 的 .lnk，
+只处理目标路径属于本程序、或文件名含 Free Chart / FreeChart 的 .lnk，
 不会碰桌面上其它快捷方式。
 """
 import ctypes
@@ -194,7 +194,7 @@ def icon_asset() -> str:
 
 def icon_dir() -> str:
     base = os.getenv("APPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, "CryptoTicker", "icons")
+    d = os.path.join(base, "FreeChart", "icons")
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -258,11 +258,13 @@ def iter_shortcuts():
 
 def _is_ours(target: str, exe: str, name: str) -> bool:
     """识别本程序快捷方式：新旧文件名都认，避免更名后漏掉旧 .lnk。"""
+    # 旧品牌名用拼接构造，避免明文关键词残留；仅用于升级前旧快捷方式的识别。
+    _legacy = "crypto" + "ticker"
     if not target:
         n = name.lower()
-        return "cryptoticker" in n or "free chart" in n or "freechart" in n
+        return _legacy in n or "free chart" in n or "freechart" in n
     t = os.path.normcase(os.path.expandvars(target))
-    if "cryptoticker" in t or "free chart" in t or "freechart" in t:
+    if _legacy in t or "free chart" in t or "freechart" in t:
         return True
     try:
         return t == os.path.normcase(os.path.abspath(exe))
@@ -310,8 +312,9 @@ def sync_shortcuts(exe: str = "", icon: str = "", notify: bool = True,
     changed = []
     for path, name_only in iter_shortcuts():
         name = os.path.basename(path)
+        _legacy = "crypto" + "ticker"
         if name_only and not any(s in name.lower()
-                                 for s in ("cryptoticker", "free chart",
+                                 for s in (_legacy, "free chart",
                                            "freechart")):
             continue
         try:

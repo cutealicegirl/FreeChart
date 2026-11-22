@@ -85,12 +85,12 @@ def main():
     # 3. 编译 Java（Java 8 字节码，d8 可直接吃）
     run(["javac", "--release", "8", "-encoding", "UTF-8",
          "-cp", ANDROID_JAR, "-d", classes,
-         os.path.join(ROOT, "src", "com", "cryptoticker", "app",
+         os.path.join(ROOT, "src", "com", "freechart", "app",
                       "MainActivity.java")], "3/8 javac")
 
     # 4. class -> classes.dex
     files = sorted(glob.glob(os.path.join(
-        classes, "com", "cryptoticker", "app", "*.class")))
+        classes, "com", "freechart", "app", "*.class")))
     if not files:
         raise SystemExit("javac 没有产出 class 文件")
     run(["java", "-cp", D8_JAR, "com.android.tools.r8.D8",
@@ -109,7 +109,7 @@ def main():
     if not os.path.exists(ks):
         run(["keytool", "-genkeypair", "-keystore", ks,
              "-storepass", "android", "-keypass", "android",
-             "-alias", "cryptoticker", "-keyalg", "RSA", "-keysize", "2048",
+             "-alias", "freechart", "-keyalg", "RSA", "-keysize", "2048",
              "-validity", "10000", "-storetype", "JKS",
              "-dname", "CN=Free Chart, OU=Dev, O=WorkBuddy, L=CN, ST=CN, C=CN"],
             "7/8 keytool")

@@ -40,7 +40,7 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 UsePreviousAppDir=yes
-; 单实例锁在数据目录 %APPDATA%\CryptoTicker，与升级兼容，无需在此处理
+; 单实例锁在数据目录 %APPDATA%\FreeChart，与升级兼容，无需在此处理
 
 [Languages]
 ; 注：本机 Inno Setup 6.7.3 未附带中文消息文件，故仅用内置 English。

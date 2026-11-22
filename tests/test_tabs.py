@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 
-# 测试使用临时配置目录，绝不污染真实 %APPDATA%/CryptoTicker/config.json
+# 测试使用临时配置目录，绝不污染真实 %APPDATA%/FreeChart/config.json
 os.environ["APPDATA"] = tempfile.mkdtemp(prefix="ct_tabs_")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["QT_QPA_PLATFORM"] = "offscreen"

@@ -31,7 +31,7 @@ _EM_URL = ("https://datacenter-web.eastmoney.com/api/data/v1/get"
 
 def _overlay_path() -> str:
     base = os.getenv("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "CryptoTicker", "corporate_actions_overlay.json")
+    return os.path.join(base, "FreeChart", "corporate_actions_overlay.json")
 
 
 def _read_overlay() -> dict:

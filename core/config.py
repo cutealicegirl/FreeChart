@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """配置持久化（JSON）。
 
-保存路径：%APPDATA%/CryptoTicker/config.json
+保存路径：%APPDATA%/FreeChart/config.json
 程序意外关闭后下次启动也能恢复全部设置。
 """
 import json
@@ -76,7 +76,7 @@ DEFAULTS: Dict[str, Any] = {
     "price_badge_y": -1,
     "price_badge_shift": 0,       # 手动左移像素（避开其它任务栏小工具）
     "price_badge_style": "full",  # 任务栏价格条信息密度：full/slim/mini
-    # 主流品种 K 线历史后台预缓存（落盘到 %APPDATA%/CryptoTicker/klines.sqlite3）
+    # 主流品种 K 线历史后台预缓存（落盘到 %APPDATA%/FreeChart/klines.sqlite3）
     "prefetch_enabled": True,     # 启动后后台预热，之后浏览直接读本地
     "prefetch_top": 40,           # 每个市场预取前 N 个主流品种（0 = 只取自选）
     "prefetch_delay": 20,         # 启动后延迟秒数，避开实时行情刷新
@@ -107,7 +107,7 @@ DEFAULTS: Dict[str, Any] = {
 def config_path() -> str:
     """配置文件完整路径。"""
     appdata = os.getenv("APPDATA") or os.path.expanduser("~")
-    return os.path.join(appdata, "CryptoTicker", "config.json")
+    return os.path.join(appdata, "FreeChart", "config.json")
 
 
 class Config:

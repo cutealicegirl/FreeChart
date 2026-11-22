@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CryptoTicker 程序入口。
+"""FreeChart 程序入口。
 
 启动参数 --minimized（注册表开机自启写入）：窗口不显示，
 只在右下角托盘运行；手动双击 EXE 时仍正常显示窗口。
@@ -20,14 +20,14 @@ def _install_error_guard():
 
     打包成窗口化 EXE 后，PyInstaller 会给未捕获异常弹一个模态错误框；
     一旦异常发生在定时器/绘制回调里就会反复弹，把界面卡死。这里统一
-    接管 sys.excepthook：写 %APPDATA%/CryptoTicker/error.log 后继续运行。
+    接管 sys.excepthook：写 %APPDATA%/FreeChart/error.log 后继续运行。
     """
     import os
     import time
     import traceback
 
     log = os.path.join(os.getenv("APPDATA") or os.path.expanduser("~"),
-                       "CryptoTicker", "error.log")
+                       "FreeChart", "error.log")
 
     def hook(exc_type, exc, tb):
         try:
@@ -42,8 +42,8 @@ def _install_error_guard():
     sys.excepthook = hook
 
 
-_SERVER_NAME = "CryptoTicker-Single-Instance-v1"
-_MUTEX_NAME = "Local\\CryptoTicker_Single_Instance"
+_SERVER_NAME = "FreeChart-Single-Instance-v1"
+_MUTEX_NAME = "Local\\FreeChart_Single_Instance"
 _mutex_handle = None
 
 
@@ -144,6 +144,9 @@ def _sync_shortcut_icon():
 
 
 def main():
+    # 品牌统一后，先把更名前版本的数据目录一次性搬到新目录，再加载配置，
+    # 保证老用户的自选 / 设置 / 缓存不因改名而丢失。
+    brand.migrate_legacy_appdata()
     _install_error_guard()
     app = QApplication(sys.argv)
     app.setApplicationName(brand.APP_NAME)

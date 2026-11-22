@@ -65,7 +65,7 @@ def _asset_dir() -> str:
 
 def _user_icon_dir() -> str:
     base = os.getenv("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "CryptoTicker", "icons")
+    return os.path.join(base, "FreeChart", "icons")
 
 
 def _app_icon_file() -> str:

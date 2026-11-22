@@ -20,7 +20,7 @@ MIN_GAP = 20.0            # 20 秒内同价重复回调不重复记点
 
 def path() -> str:
     base = os.getenv("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "CryptoTicker", "onchain_history.json")
+    return os.path.join(base, "FreeChart", "onchain_history.json")
 
 
 def _load() -> dict:

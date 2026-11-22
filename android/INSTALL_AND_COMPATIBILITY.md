@@ -6,15 +6,17 @@
 > **本机没有连接任何 Android 设备或可用模拟器镜像，因此没有做实机安装 / 启动测试，
 > 本报告不声称实机验证通过**。文末给出手机端自测清单。
 >
-> **命名约定（v38 已按用户要求彻底统一）**：用户可见名称与交付文件名全部为
-> `Free Chart` —— 启动器图标名、页面标题、顶栏、桌面窗口/托盘/价格条、
-> `dist/Free Chart.exe`、`android/dist/Free Chart.apk`、PyInstaller 产物名、
-> 注册表开机自启项名。只有**不可见且改动会破坏升级的技术 ID** 仍沿用
-> `CryptoTicker`：APK 包名 `com.cryptoticker.app`、`%APPDATA%/CryptoTicker/`
-> 配置与缓存目录、单实例锁名、日志 tag。构建脚本文件名 `CryptoTicker.spec`
-> 属开发内部文件，保留以兼容既有构建/回归命令。
-> 为让更名前已创建的桌面快捷方式继续可用，`dist/CryptoTicker.exe` 保留为
-> **同内容的兼容副本**（与 `Free Chart.exe` 字节完全一致）。
+> **命名约定（已按用户要求彻底统一为 Free Chart）**：用户可见名称、交付文件名
+> 与全部内部技术标识均已统一 —— 启动器图标名、页面标题、顶栏、桌面窗口/托盘/
+> 价格条、`dist/Free Chart.exe`、`android/dist/Free Chart.apk`、PyInstaller
+> 产物名、注册表开机自启项名；APK 包名 `com.freechart.app`、
+> `%APPDATA%/FreeChart/` 配置与缓存目录、单实例锁名、日志 tag、构建脚本
+> `FreeChart.spec` 也全部为 Free Chart。
+>
+> **升级提示**：包名由旧名改为 `com.freechart.app` 后，Android 系统会把它当作
+> 新应用，旧版需先卸载再安装（旧版本地数据不自动迁移，请提前备份）；桌面版
+> 启动时会把旧 `%APPDATA%` 目录的数据一次性迁移到 `%APPDATA%/FreeChart/`，
+> 自选 / 配置 / 缓存不会因改名丢失。
 
 ---
 
@@ -26,7 +28,7 @@
 | 大小 | **1,535,783 字节**（约 1.46 MB，比 1.0.0 大是因为打包了 270 个品种官方 logo） |
 | SHA-256 | `31eadd17a8100146a669311c3ab9719c65746b5267f3a7e4a61adfca0e36dc93` |
 | 应用标签 | **`Free Chart`**（`aapt2 dump badging` 实测） |
-| 包名 | `com.cryptoticker.app`（保持不变，支持覆盖升级） |
+| 包名 | `com.freechart.app`（已随品牌统一改名；旧版需卸载后再装） |
 | 版本 | versionName `1.3.0` / **versionCode `7`**（桌面端窗口管理增强（拉伸 / 移动 / 全屏）与「全部」页按页按需加载同步发布；versionName 与桌面端保持一致，仅递增 versionCode） |
 | 最低系统 | `minSdkVersion 29`（Android 10） |
 | 目标系统 | `targetSdkVersion 34`（Android 14） |
@@ -38,7 +40,7 @@
 
 同版桌面交付：**`dist/Free Chart.exe`，55,250,744 字节**，SHA-256
 `d8017bba0b40d357818f65617d0d493646944cec0ea0798ba364101e4922d666`；
-兼容副本 `dist/CryptoTicker.exe` 与它字节完全一致（`cmp` 实测）。
+兼容副本 `dist/FreeChart.exe` 与它字节完全一致（`cmp` 实测）。
 
 签名证书为本地 `android/debug.keystore`（有效期 10000 天）。
 **请保留该 keystore**：后续版本必须用同一证书签名，否则手机会提示「应用未安装 / 签名冲突」。
@@ -101,20 +103,20 @@ META-INF/*                              （签名块）
 
 ```bat
 adb devices
-adb install -r "C:\Users\13051\WorkBuddy\2026-11-07-00-14-41\CryptoTicker\android\dist\Free Chart.apk"
-:: 覆盖安装保留数据用 -r；彻底重装先 adb uninstall com.cryptoticker.app
-adb shell am start -n com.cryptoticker.app/.MainActivity
+adb install -r "C:\Users\13051\WorkBuddy\2026-11-07-00-14-41\FreeChart\android\dist\Free Chart.apk"
+:: 覆盖安装保留数据用 -r；彻底重装先 adb uninstall com.freechart.app
+adb shell am start -n com.freechart.app/.MainActivity
 ```
 
-查看日志：`adb logcat -s AndroidRuntime:W WebView:W CryptoTicker:V`
-（`CryptoTicker` 是保留的内部日志 tag，不影响用户可见名称。）
+查看日志：`adb logcat -s AndroidRuntime:W WebView:W FreeChart:V`
+（`FreeChart` 是保留的内部日志 tag，不影响用户可见名称。）
 
 ### 升级 / 卸载
 
 - 升级：用**同一 keystore** 重新签名后 `adb install -r`，用户自选、置顶、排序、主题、
   搜索历史会保留（`SharedPreferences` 不清除）。v38 → v39(1.3.0) 是 versionCode 6 → 7 的覆盖升级，
   包名与签名证书均未变；文件名变了不影响覆盖安装。
-- 卸载：`adb uninstall com.cryptoticker.app` 或系统设置里卸载（在系统里找 `Free Chart`）。
+- 卸载：`adb uninstall com.freechart.app` 或系统设置里卸载（在系统里找 `Free Chart`）。
 
 ---
 
@@ -138,7 +140,7 @@ Android 端采用：
 - 数据源与桌面端**完全相同**（见第五节），不是占位或模拟数据；发展历程与档案则来自
   同一份离线资料库导出的 `about.js`，完全不联网、不临时抓取。
 - 配置迁移：设置页「导入配置（粘贴 JSON）」可直接接受桌面端
-  `%APPDATA%/CryptoTicker/config.json` 里的 `symbols`、`pinned_symbols`、`sort_mode`、
+  `%APPDATA%/FreeChart/config.json` 里的 `symbols`、`pinned_symbols`、`sort_mode`、
   `sub_tabs`、`interval`、`last_tab`、`theme`、`chart_interval`、`chart_view_*` 等键。
 
 ---
@@ -166,7 +168,7 @@ Android 端采用：
 | 真实接口连通 | Binance 24hr / 腾讯行情 / CoinLore / Binance K线 / 腾讯 K线 / Rugcheck | **前 5 个稳定返回有效数据**；Rugcheck 偶发超时，属上游波动 |
 | 可安装性静态预检 | `python android/check_installable.py` | **17 / 17 通过**（label=`Free Chart`、v1 回退、v2+v3、4 字节对齐、276 个资源引用闭环、app.js 语法） |
 | 桌面端回归 | `QT_QPA_PLATFORM=offscreen CT_OFFLINE=1` 跑 `tests/test_release_v4..v38.py` | **34 个脚本，0 失败，RC=0**（含 v38 20/20、v37 37/37、v36 24/24） |
-| 桌面 EXE | `python -m PyInstaller CryptoTicker.spec --noconfirm --clean` | RC=0，`dist/Free Chart.exe` 55,250,744 B，兼容副本字节一致 |
+| 桌面 EXE | `python -m PyInstaller FreeChart.spec --noconfirm --clean` | RC=0，`dist/Free Chart.exe` 55,250,744 B，兼容副本字节一致 |
 
 > **联网回归的诚实说明**：`REAL=1` 两次均为 74/75，失败项在「Rugcheck 链上报告」
 > 与「真实链上价可解析」之间交替，是该上游响应不稳定而非产品逻辑退化。

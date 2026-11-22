@@ -59,7 +59,7 @@ assert c2.blue() > c2.red(), f"应换成新图, 实际 {c2.name()}"
 print("4. 缓存失效后立即换图 OK")
 
 # ===== 5. 域名缓存：命中 JSON 时不发网络请求 =====
-cache = os.path.join(_APPDATA, "CryptoTicker", "stock_domains.json")
+cache = os.path.join(_APPDATA, "FreeChart", "stock_domains.json")
 os.makedirs(os.path.dirname(cache), exist_ok=True)
 with open(cache, "w", encoding="utf-8") as f:
     json.dump({"HK:00700": "www.tencent.com"}, f)

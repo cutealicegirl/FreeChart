@@ -92,7 +92,7 @@ def is_fresh(symbol, interval, ttl=900):
 
 ### 2.7 其它
 
-- `CryptoTicker.spec`：`hiddenimports` 加入 `core.kline_time`，避免冻结版缺模块。
+- `FreeChart.spec`：`hiddenimports` 加入 `core.kline_time`，避免冻结版缺模块。
 - 测试文件：`tests/test_kline_time_sync.py`（新增）、`android/tests/test_app_kline_time_sync.js`（新增）、`tests/test_cross_platform_intervals.py` 等 8 个适配。
 
 ---

@@ -1,4 +1,4 @@
-package com.cryptoticker.app;
+package com.freechart.app;
 
 import android.app.Activity;
 import android.content.ClipData;
@@ -44,7 +44,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-        prefs = getSharedPreferences("cryptoticker", MODE_PRIVATE);
+        prefs = getSharedPreferences("freechart", MODE_PRIVATE);
 
         web = new WebView(this);
         WebSettings s = web.getSettings();

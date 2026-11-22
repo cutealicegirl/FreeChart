@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, QEvent, QPointF
 from PySide6.QtGui import QKeyEvent, QMouseEvent
 app = QApplication([])
-sys.path.insert(0, r"C://Users//13051//WorkBuddy//2026-11-07-00-14-41//CryptoTicker")
+sys.path.insert(0, r"C://Users//13051//WorkBuddy//2026-11-07-00-14-41//FreeChart")
 from core.config import Config
 from core import asset_search as _A
 from ui.main_window import MainWindow

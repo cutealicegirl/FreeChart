@@ -15,9 +15,9 @@ os.environ["APPDATA"] = _TMP
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
-os.makedirs(os.path.join(_TMP, "CryptoTicker"), exist_ok=True)
+os.makedirs(os.path.join(_TMP, "FreeChart"), exist_ok=True)
 # 故意留下旧版「固定展开」脏配置，验证新版启动会纠正
-with open(os.path.join(_TMP, "CryptoTicker", "config.json"),
+with open(os.path.join(_TMP, "FreeChart", "config.json"),
           "w", encoding="utf-8") as f:
     json.dump({"chart_tools_open": True, "mascot_enabled": True,
                "mascot_speech": True, "mascot_bubble_style": "candy",

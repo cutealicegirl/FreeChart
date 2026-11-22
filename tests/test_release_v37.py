@@ -46,8 +46,8 @@ def ok(name, cond, extra=""):
 print("=== v37 · 品牌 / 资料库 / 详情准确性 / 图表极值口径 ===\n")
 
 # ---------------- 1. 品牌 ----------------
-ok("1. 程序更名为 Free Chart，内部 ID 保持兼容",
-   brand.APP_NAME == "Free Chart" and brand.APP_ID == "CryptoTicker"
+ok("1. 程序名与内部 ID 全面统一为 Free Chart / FreeChart",
+   brand.APP_NAME == "Free Chart" and brand.APP_ID == "FreeChart"
    and "全市场行情" in brand.APP_TITLE)
 _mw = open(os.path.join(_ROOT, "ui", "main_window.py"), encoding="utf-8").read()
 _pb = open(os.path.join(_ROOT, "ui", "price_badge.py"), encoding="utf-8").read()
@@ -60,15 +60,15 @@ ok("2. 桌面 / Android 可见文案全部换成新名",
    and "brand.BADGE_TOOLTIP" in _pb
    and "<string name=\"app_name\">Free Chart</string>" in _strings
    and "Free Chart" in _index)
-# v38：用户要求「程序名字」也统一，交付文件名改成 Free Chart。
-# 仍然不能动的是包名 / 配置目录 / 单实例锁这些内部 ID（否则升级丢数据）。
-ok("3. 包名 / 配置目录保留内部 ID，交付文件名改为 Free Chart",
-   brand.APP_ID == "CryptoTicker"
+# 品牌彻底统一：包名 / 配置目录 / spec / 交付名全部为 FreeChart。
+# 旧配置目录由 brand.migrate_legacy_appdata() 在启动时一次性迁移，不丢数据。
+ok("3. 包名 / 配置目录 / spec / 交付名全部统一为 FreeChart",
+   brand.APP_ID == "FreeChart"
    and "name='Free Chart'" in open(
-       os.path.join(_ROOT, "CryptoTicker.spec"), encoding="utf-8").read()
-   and '"CryptoTicker", "config.json"' in open(
+       os.path.join(_ROOT, "FreeChart.spec"), encoding="utf-8").read()
+   and '"FreeChart", "config.json"' in open(
        os.path.join(_ROOT, "core", "config.py"), encoding="utf-8").read()
-   and 'package="com.cryptoticker.app"' in open(
+   and 'package="com.freechart.app"' in open(
        os.path.join(_ROOT, "android", "AndroidManifest.xml"),
        encoding="utf-8").read())
 

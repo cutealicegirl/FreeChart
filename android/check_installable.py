@@ -86,10 +86,16 @@ def main():
     check("2. ZIP 结构完整", bad is None, "bad=%s, %d entries" % (bad, len(names)))
 
     # 3. 必需条目
+    # 签名块文件名由 keystore 的 alias 决定（历史 keystore 可能沿用旧 alias），
+    # 因此只校验 META-INF 下存在 .SF/.RSA，不依赖具体 alias 名。
+    sf = [n for n in names if n.startswith("META-INF/") and n.endswith(".SF")]
+    rsa = [n for n in names if n.startswith("META-INF/") and
+           (n.endswith(".RSA") or n.endswith(".DSA") or n.endswith(".EC"))]
     need = ["AndroidManifest.xml", "classes.dex", "resources.arsc",
-            "META-INF/MANIFEST.MF", "META-INF/CRYPTOTI.SF", "META-INF/CRYPTOTI.RSA"]
+            "META-INF/MANIFEST.MF"]
     miss = [n for n in need if n not in names]
-    check("3. 安装必需条目", not miss, "缺失: %s" % (miss or "无"))
+    check("3. 安装必需条目", not miss and bool(sf) and bool(rsa),
+          "缺失: %s, 签名块: %s" % (miss or "无", (sf + rsa) or "无"))
 
     # 4. badging
     if not BT:
@@ -102,12 +108,12 @@ def main():
         act = re.search(r"launchable-activity: name='([^']+)'", badging)
         label = re.search(r"application-label:'([^']+)'", badging)
         icon = re.search(r"application:.*?icon='([^']*)'", badging)
-        check("4. 包名 / 版本", bool(pkg) and pkg.group(1) == "com.cryptoticker.app",
+        check("4. 包名 / 版本", bool(pkg) and pkg.group(1) == "com.freechart.app",
               pkg.group(1) if pkg else "解析失败")
         check("5. minSdk / targetSdk",
               bool(sdk and tgt and sdk.group(1) == "29" and tgt.group(1) == "34"),
               "min=%s target=%s" % (sdk.group(1) if sdk else "?", tgt.group(1) if tgt else "?"))
-        check("6. 可启动 Activity", bool(act) and act.group(1) == "com.cryptoticker.app.MainActivity",
+        check("6. 可启动 Activity", bool(act) and act.group(1) == "com.freechart.app.MainActivity",
               act.group(1) if act else "无 LAUNCHER")
         check("7. 应用标签与图标", bool(label) and bool(icon) and icon.group(1) != "",
               "label=%s icon=%s" % (label.group(1) if label else "?",
@@ -156,8 +162,8 @@ def main():
 
     # 15. DEX 入口类与桥注解
     dex = z.read("classes.dex")
-    need_dex = [b"Lcom/cryptoticker/app/MainActivity;",
-                b"Lcom/cryptoticker/app/MainActivity$Bridge;",
+    need_dex = [b"Lcom/freechart/app/MainActivity;",
+                b"Lcom/freechart/app/MainActivity$Bridge;",
                 b"Landroid/webkit/JavascriptInterface;",
                 b"file:///android_asset/www/index.html"]
     miss_d = [s.decode() for s in need_dex if s not in dex]

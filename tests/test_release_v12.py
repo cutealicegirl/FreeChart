@@ -201,12 +201,12 @@ assert sc.sync_icon_file() == ico, "同一份 ICO 必须落到同一个哈希文
 
 exe = os.path.join(_ROOT, "dist", "Free Chart.exe")
 assert sc._is_ours(exe, exe, "x.lnk")
-assert sc._is_ours(r"C:\somewhere\CryptoTicker.exe", exe, "x.lnk")
+assert sc._is_ours(r"C:\somewhere\FreeChart.exe", exe, "x.lnk")
 assert not sc._is_ours(r"C:\Windows\notepad.exe", exe, "x.lnk")
 
 # 有真实快捷方式时，在副本上验证「只改图标、不改目标」
 srcs = glob.glob(os.path.join(os.path.expanduser("~"), "Desktop",
-                              "CryptoTicker*.lnk"))
+                              "FreeChart*.lnk"))
 if srcs:
     tmp = os.path.join(tempfile.mkdtemp(prefix="ct_lnk_"), "copy.lnk")
     shutil.copyfile(srcs[0], tmp)          # copy2 会带 ACL，普通复制即可

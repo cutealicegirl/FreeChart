@@ -24,8 +24,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
 # 预置「脏配置」：用户上次把工具条固定展开了
-os.makedirs(os.path.join(_TMP, "CryptoTicker"), exist_ok=True)
-with open(os.path.join(_TMP, "CryptoTicker", "config.json"),
+os.makedirs(os.path.join(_TMP, "FreeChart"), exist_ok=True)
+with open(os.path.join(_TMP, "FreeChart", "config.json"),
           "w", encoding="utf-8") as f:
     json.dump({"chart_tools_open": True, "mascot_enabled": False,
                "mascot_speech": True, "price_badge": False}, f)

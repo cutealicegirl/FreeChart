@@ -166,7 +166,7 @@
 - `core/brand.py`：`APP_VERSION = 1.5.0`
 - `android/AndroidManifest.xml`：`versionCode = 9`，`versionName = 1.5.0`
 - `installer/FreeChart.iss`：`MyAppVersion = 1.5.0`
-- `CryptoTicker.spec`：加入 `data.onchain_kline` 到 `hiddenimports`
+- `FreeChart.spec`：加入 `data.onchain_kline` 到 `hiddenimports`
 
 ---
 

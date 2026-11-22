@@ -1,4 +1,4 @@
-/* CryptoTicker Android：单列、竖屏、触摸优先。
+/* FreeChart Android：单列、竖屏、触摸优先。
    所有尺寸用 dp 等价的 px（WebView viewport 已按设备像素比换算），
    可点区域一律 ≥44px；不使用 hover / 右键等桌面交互。 */
 :root {

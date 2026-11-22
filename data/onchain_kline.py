@@ -175,7 +175,7 @@ def _set_status(symbol: str, state: str, source: str, count: int = 0,
 # ---------------- 交易池解析（含迁移重解析） ----------------
 def _pool_cache_path() -> str:
     base = os.getenv("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "CryptoTicker", "onchain_pools.json")
+    return os.path.join(base, "FreeChart", "onchain_pools.json")
 
 
 def _load_pool_cache() -> dict:

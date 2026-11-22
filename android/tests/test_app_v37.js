@@ -98,7 +98,7 @@ ok('2. HTML 标题 / 顶栏 / APK 应用名都改成 Free Chart',
     .indexOf('<string name="app_name">Free Chart</string>') >= 0);
 ok('3. APK 包名与版本号未破坏升级',
   read(path.join(ANDROID, 'AndroidManifest.xml'))
-    .indexOf('package="com.cryptoticker.app"') >= 0 &&
+    .indexOf('package="com.freechart.app"') >= 0 &&
   read(path.join(ANDROID, 'AndroidManifest.xml'))
     .indexOf('android:versionName="1.5.0"') >= 0);
 

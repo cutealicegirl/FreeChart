@@ -199,7 +199,7 @@ def blank_profile(symbol: str) -> dict:
 # --------------------------------------------------------------------------
 def cache_path() -> str:
     appdata = os.getenv("APPDATA") or os.path.expanduser("~")
-    return os.path.join(appdata, "CryptoTicker", "fundamentals.json")
+    return os.path.join(appdata, "FreeChart", "fundamentals.json")
 
 
 def _read_disk() -> Dict[str, Any]:
@@ -432,7 +432,7 @@ def profile(symbol: str, price: float = 0.0, timeout: float = 8.0) -> dict:
         protocol_revenue：当前没有接入对应数据源，一律 None，绝不编造。
 
     缓存策略（静态数据本地固化，不必每次都调接口）：
-      - 首次联网取回后落盘到 %APPDATA%/CryptoTicker/fundamentals.json；
+      - 首次联网取回后落盘到 %APPDATA%/FreeChart/fundamentals.json；
       - 进程内缓存 30 分钟内零延迟复用；
       - 内存未命中时优先读本地固化缓存，DISK_TTL（1 天）内直接用它，
         不再每次启动都去调腾讯 / CoinLore 接口；

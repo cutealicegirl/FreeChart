@@ -154,7 +154,7 @@ class ActionRegistry:
     @staticmethod
     def _default_overlay() -> str:
         base = os.getenv("APPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "CryptoTicker", "corporate_actions_overlay.json")
+        return os.path.join(base, "FreeChart", "corporate_actions_overlay.json")
 
     def _load(self):
         self._actions, self._migrations = {}, []

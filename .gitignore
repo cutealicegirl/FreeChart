@@ -35,7 +35,7 @@ preview/
 *.keystore
 *.jks
 
-# ── 运行期本地数据（实际位于 %APPDATA%/CryptoTicker，此处兜底）──
+# ── 运行期本地数据（实际位于 %APPDATA%/FreeChart，此处兜底）──
 config.json
 *.sqlite3
 *.db

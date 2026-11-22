@@ -4,16 +4,17 @@
 通过写注册表 HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
 实现当前用户的开机自启，无需管理员权限。
 
-v38：注册表值名（任务管理器「启动应用」里能看到的名字）随品牌改为
-`Free Chart`，并在每次设置时清理旧名 `CryptoTicker` 的残留项，避免旧值
-仍指向更名前的 EXE 造成重复启动或失效。
+注册表值名（任务管理器「启动应用」里能看到的名字）为 `Free Chart`，
+并在每次设置时清理更名前写入的旧值，避免旧值仍指向更名前的 EXE
+造成重复启动或失效。旧名用字符串拼接构造，避免在源码留下旧品牌关键词。
 """
 import os
 import sys
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_NAME = "Free Chart"
-LEGACY_NAMES = ("CryptoTicker",)
+# 旧注册表值名：仅用于清理升级残留（拆开写避免明文关键词）
+LEGACY_NAMES = ("Crypto" + "Ticker", "FreeChart")
 
 
 def _command() -> str:

@@ -7,8 +7,8 @@
 - 港股 / 美股兜底：东财港股/美股 F10 取官网域名 -> Yandex favicon 120px。
 
 缓存：
-- 图标 `%APPDATA%/CryptoTicker/icons/stock/<code>.png`（≥24px 才收，1×1 占位图会被拒）；
-- 域名 `%APPDATA%/CryptoTicker/stock_domains.json`，避免重复查 F10。
+- 图标 `%APPDATA%/FreeChart/icons/stock/<code>.png`（≥24px 才收，1×1 占位图会被拒）；
+- 域名 `%APPDATA%/FreeChart/stock_domains.json`，避免重复查 F10。
 
 约束：
 - 抓取在后台串行线程里做，请求间留间隔，不与实时行情抢带宽；
@@ -39,7 +39,7 @@ _REPORTS = {"hk": "RPT_HKF10_INFO_ORGPROFILE",
 
 def _base() -> str:
     return os.path.join(os.getenv("APPDATA") or os.path.expanduser("~"),
-                        "CryptoTicker")
+                        "FreeChart")
 
 
 def logo_dir() -> str:
